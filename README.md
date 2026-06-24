@@ -1,4 +1,3 @@
-# automation-orfeo
 # Maison Darwish — Automatisations Orfeo
 
 Automatisation du suivi commercial et de l'enrichissement de données pour
@@ -34,14 +33,27 @@ le remplacent pas.
 
 - **STRUCTURE** = un **LIEU** (salle, festival). Porte des champs personnalisés.
   N'a PAS de statut.
-- **PROJECT** = une **AFFAIRE commerciale** = artiste + lieu + date potentielle.
-  C'est lui qui porte le **STATUT** (le tunnel de vente).
+- **DATE / PROJECT** = une **AFFAIRE commerciale** = artiste + lieu + date potentielle.
+  C'est elle qui porte le **STATUT** (le tunnel de vente). Appelée "date" dans l'UI,
+  "project" dans l'API.
 - **SPECTACLE** = le projet artistique d'un artiste (ce qui est vendu).
 - **TASK** = une tâche de suivi, rattachable à un objet.
 
-**Règle adoptée :** un lieu travaillé pour un artiste = un **PROJECT**, même au
-tout début (stade « Lead »), avec le bon statut. Le tunnel commercial vit dans
-les statuts de PROJECT, pas dans le nom des tâches.
+### Tunnel commercial (statuts d'une date)
+
+```
+Intérêt → En négociation → Option → Gagnée / Perdue
+```
+
+**Règle clé :** une date n'est créée que lorsqu'il y a déjà un intérêt de la salle.
+Les stades antérieurs (prospection froide, premier appel) ne génèrent pas de date —
+ils restent au niveau de la structure elle-même (une structure sans date = un lead
+non encore travaillé).
+
+- `Intérêt` : statut par défaut à la création d'une date.
+- `En négociation` : discussions en cours.
+- `Option` : date réservée, pas encore confirmée.
+- `Gagnée` / `Perdue` : statuts terminaux natifs Orfeo (non modifiables).
 
 ---
 
@@ -50,7 +62,7 @@ les statuts de PROJECT, pas dans le nom des tâches.
 ```
 BASE URL   : https://orfeoapp.com/api/
 AUTH       : header  ->  Authorization: Token <TOKEN>
-RATE LIMIT : 10 requêtes / seconde max. Au-delà : HTTP 429. Throttle les boucles.
+RATE LIMIT : 10 requêtes / seconde max. Au-delà : HTTP 429. Throttler les boucles.
 FORMAT     : JSON paginé  -> { count, next, previous, results }. Clé primaire = "pk".
 PAGINATION : ?page_size=N  &  ?page=N
 ```
@@ -61,7 +73,7 @@ PAGINATION : ?page_size=N  &  ?page=N
 GET/POST/PATCH  /api/project/         filtres: status, status__in, start_date__gt/lt,
                                       update_date__gt/lt, creation_date__gt/lt,
                                       custom_fields, spectacle
-GET/POST        /api/project_status/  les statuts du tunnel
+GET             /api/project_status/  les statuts du tunnel (lecture seule via API)
 GET/POST/PATCH  /api/structure/       les lieux + champs personnalisés
 GET/POST/PATCH  /api/task/            POST requiert: title, due_date, assigned_to,
                                       structure_person ; rattachement via
@@ -72,9 +84,14 @@ GET/POST        /api/note/
 
 Filtre sur champ personnalisé : `?custom_fields=<key>:<valeur>`
 
-**À vérifier dès le départ :** `custom_fields` apparaît en lecture seule sur la
-vue LISTE mais devrait s'écrire via PATCH sur la vue OBJET
-(`/api/structure/<id>/`). Confirmer par un PATCH de test avant de construire dessus.
+### Limitations découvertes
+
+- **Statuts** : `POST /api/project_status/` retourne HTTP 500 — les statuts doivent
+  être créés manuellement dans l'UI Orfeo (Statuts d'opportunités).
+- **Champs custom** : `POST /api/custom_field/` exige le champ `label` (pas `name`).
+  L'`object_type` pour les structures est `"entity"`.
+- **PATCH custom_fields** : on ne peut écrire que dans des champs qui existent déjà.
+  Un champ inexistant retourne HTTP 400.
 
 ---
 
@@ -101,40 +118,69 @@ Principes :
 
 ---
 
-## 5. Prérequis fondateur (une seule fois)
+## 5. Prérequis (une seule fois)
 
-Avant toute automatisation, structurer les données :
+### 5a. Dans l'UI Orfeo (ne peut pas se faire via API)
 
-1. **Créer les statuts du tunnel** (`POST /api/project_status/`) :
-   `Lead → Qualifié → Contacté → En négociation → Option → Confirmé → Perdu`
-2. **Créer les champs personnalisés** sur `structure` (`POST /api/custom_field/`) :
-   `genre_musical` (choices), `capacite` (int), `type_lieu` (choices),
-   `score_compatibilite` (int 0-100), `score_artiste` (text), `score_date` (date)
-3. **Générer le token API** dans Orfeo (page « API & webhooks ») et le placer
-   dans `ORFEO_TOKEN`.
+Créer les statuts manquants dans **Paramètres → Statuts d'opportunités** :
+- `En négociation`
+- `Option` (si absent)
+
+Déjà présents : `Intérêt`, `Gagnée`, `Perdue`.
+
+### 5b. Via script (setup_orfeo.py)
+
+Créer les **3 champs personnalisés de scoring** sur les structures :
+
+| Clé | Label | Type |
+|---|---|---|
+| `score_compatibilite` | Score compatibilité | text |
+| `score_artiste` | Score artiste | text |
+| `score_date` | Date du score | date |
+
+Les champs `genre_musical`, `capacité` et `type_lieu` sont gérés par les champs
+natifs de la fiche Salle dans Orfeo — pas besoin de les recréer en custom fields.
+
+```bash
+export ORFEO_TOKEN="..."
+python3 setup_orfeo.py
+```
+
+### 5c. Token API
+
+Générer le token dans Orfeo (page « API & webhooks ») et le placer dans `ORFEO_TOKEN`.
 
 ---
 
 ## 6. Feuille de route des automatisations
 
-| # | Automatisation | Complexité | ROI |
-|---|----------------|-----------|-----|
-| 1 | Notification quotidienne des leads dormants | ★☆☆☆☆ | Élevé |
-| 2 | Enrichissement auto des fiches incomplètes | ★★★☆☆ | Très élevé |
-| 3 | Création auto de tâches selon statut | ★★☆☆☆ | Élevé |
-| 4 | Assistant questions en français sur les données Orfeo | ★★★☆☆ | Moyen-élevé |
-| 5 | Scoring de compatibilité artiste / lieu | ★★★★☆ | Très élevé |
-| 6 | Brouillons de relance | ★★★☆☆ | Moyen |
+| # | Automatisation | Complexité | ROI | Statut |
+|---|----------------|-----------|-----|--------|
+| 1 | Notification quotidienne des dates dormantes | ★☆☆☆☆ | Élevé | En cours |
+| 2 | Enrichissement auto des fiches incomplètes | ★★★☆☆ | Très élevé | À faire |
+| 3 | Création auto de tâches selon statut | ★★☆☆☆ | Élevé | À faire |
+| 4 | Assistant questions en français sur les données Orfeo | ★★★☆☆ | Moyen-élevé | À faire |
+| 5 | Scoring de compatibilité artiste / lieu | ★★★★☆ | Très élevé | À faire |
+| 6 | Brouillons de relance | ★★★☆☆ | Moyen | À faire |
 
 Ordre de construction : **1 → 2 → 3 → 4 → 5 → 6** (valeur rapide d'abord,
 gros chantiers une fois l'API maîtrisée).
 
-### Détail #1 — Leads dormants
-Chaque matin, lister les projects sans activité depuis X jours.
-`GET /api/project/?status__in=<lead,qualifié,contacté>&update_date__lt=<J-X>`
-→ récap mail (nom, statut, jours d'inactivité, lien fiche). Cron 1×/jour.
+### Détail #1 — Dates dormantes
+
+Chaque matin, lister les dates sans activité depuis X jours (défaut : 7).
+Statuts surveillés : `Intérêt`, `En négociation`.
+
+```
+GET /api/project/?status__in=<pk_interet>,<pk_en_nego>&update_date__lt=<J-X>
+```
+
+→ récap mail (nom du lieu, statut, jours d'inactivité, lien fiche). Cron 1×/jour.
+
+Script : `dormant_dates.py`
 
 ### Détail #2 — Enrichissement des fiches
+
 Repérer les `structure` incomplètes, chercher les infos manquantes sur le web,
 écrire dans Orfeo. **Logique en deux bacs :**
 - **Bac « fiable » → écriture directe** (PATCH) : nom, adresse, ville/CP, site web,
@@ -148,24 +194,26 @@ Repérer les `structure` incomplètes, chercher les infos manquantes sur le web,
 Privilégier les coordonnées professionnelles (prospection B2B, cadre RGPD).
 
 ### Détail #5 — Scoring de compatibilité
+
 Pour un artiste, scorer les 100-300 lieux et prioriser les appels.
-Étapes : récupérer lieux + champs custom (Orfeo) → récupérer la **programmation
+Étapes : récupérer lieux + champs natifs (Orfeo) → récupérer la **programmation
 passée** de chaque salle (**source externe : absente d'Orfeo**, c'est la vraie
 difficulté) → API Claude juge la compatibilité (genre, artistes similaires déjà
-programmés, capacité, type) → score 0-100 + justification → PATCH dans Orfeo.
+programmés, capacité, type) → score 0-100 + justification → PATCH dans Orfeo
+(`score_compatibilite`, `score_artiste`, `score_date`).
 
 ---
 
 ## 7. Points d'attention
 
-- **Rate limit 10 req/s** : throttler les boucles (`time.sleep`) sur les gros volumes.
+- **Rate limit 10 req/s** : throttler les boucles (`time.sleep(0.12)`) sur les gros volumes.
 - **Idempotence** : chaque script polling vérifie « ai-je déjà agi sur cet objet ? ».
 - **Tâches** : `POST /api/task/` exige `assigned_to` + `structure_person`. Récupérer
   son propre user/person `pk` une fois pour toutes.
 - **Anti-invention** (enrichissement & scoring) : toute donnée incertaine est
   étiquetée source + confiance, jamais écrite en dur sans validation.
 - **Secrets** : `ORFEO_TOKEN` et clés API en variables d'environnement, jamais
-  commitées. Prévoir un `.gitignore` (voir §8).
+  commitées.
 
 ---
 
@@ -175,6 +223,14 @@ programmés, capacité, type) → score 0-100 + justification → PATCH dans Orf
 # Variables d'environnement requises
 export ORFEO_TOKEN="<ton_token_orfeo>"
 export ANTHROPIC_API_KEY="<ta_clé_api_claude>"   # pour scoring / structuration
+
+# Pour l'automation #1 (email)
+export EMAIL_FROM="<ton_adresse_gmail>"
+export EMAIL_TO="<destinataire>"
+export GMAIL_APP_PASSWORD="<mot_de_passe_application_gmail>"
+
+# Optionnel
+export SEUIL_JOURS="7"   # jours sans activité avant alerte (défaut : 7)
 ```
 
 `.gitignore` minimal :
@@ -187,13 +243,10 @@ secrets/
 
 ---
 
-## 9. Première tâche (script de diagnostic)
+## 9. Scripts disponibles
 
-Avant de coder du définitif :
-1. Vérifier l'auth : `GET /api/project/?page_size=1` avec `ORFEO_TOKEN`.
-2. Lister les statuts existants (`GET /api/project_status/`) et les champs
-   personnalisés (`GET /api/custom_field/`).
-3. Faire un **PATCH de test** sur une `structure` pour confirmer qu'on peut écrire
-   dans un champ personnalisé (étape critique).
-
-Afficher les résultats, puis décider de la suite.
+| Script | Rôle |
+|---|---|
+| `diagnostic.py` | Vérifie l'auth, liste statuts et champs custom, teste un PATCH |
+| `setup_orfeo.py` | Crée les 3 champs de scoring manquants (idempotent) |
+| `dormant_dates.py` | Notification quotidienne des dates sans activité *(en cours)* |
