@@ -120,13 +120,19 @@ Principes :
 
 ## 5. Prérequis (une seule fois)
 
-### 5a. Dans l'UI Orfeo (ne peut pas se faire via API)
+### 5a. Statuts dans Orfeo
 
-Créer les statuts manquants dans **Paramètres → Statuts d'opportunités** :
-- `En négociation`
-- `Option` (si absent)
+Les statuts de projets ne peuvent pas être créés via l'API (retourne HTTP 500).
+Les statuts existants dans l'API sont suffisants pour les automatisations :
 
-Déjà présents : `Intérêt`, `Gagnée`, `Perdue`.
+| pk | Statut | Rôle |
+|---|---|---|
+| 22454 | `Intérêt` | Statut par défaut à la création d'une date |
+| 22439 | `Option` | Date réservée, pas encore confirmée |
+| 22440 | `Confirmé` | Booking confirmé |
+| 22441 | `Perdu` | Deal perdu |
+
+Statuts surveillés par `dormant_dates.py` : **Intérêt** et **Option**.
 
 ### 5b. Via script (setup_orfeo.py)
 
@@ -156,7 +162,7 @@ Générer le token dans Orfeo (page « API & webhooks ») et le placer dans `ORF
 
 | # | Automatisation | Complexité | ROI | Statut |
 |---|----------------|-----------|-----|--------|
-| 1 | Notification quotidienne des dates dormantes | ★☆☆☆☆ | Élevé | En cours |
+| 1 | Notification quotidienne des dates dormantes | ★☆☆☆☆ | Élevé | ✅ Fait |
 | 2 | Enrichissement auto des fiches incomplètes | ★★★☆☆ | Très élevé | À faire |
 | 3 | Création auto de tâches selon statut | ★★☆☆☆ | Élevé | À faire |
 | 4 | Assistant questions en français sur les données Orfeo | ★★★☆☆ | Moyen-élevé | À faire |
@@ -166,16 +172,16 @@ Générer le token dans Orfeo (page « API & webhooks ») et le placer dans `ORF
 Ordre de construction : **1 → 2 → 3 → 4 → 5 → 6** (valeur rapide d'abord,
 gros chantiers une fois l'API maîtrisée).
 
-### Détail #1 — Dates dormantes
+### Détail #1 — Dates dormantes ✅
 
 Chaque matin, lister les dates sans activité depuis X jours (défaut : 7).
-Statuts surveillés : `Intérêt`, `En négociation`.
+Statuts surveillés : `Intérêt` (pk=22454), `Option` (pk=22439).
 
 ```
-GET /api/project/?status__in=<pk_interet>,<pk_en_nego>&update_date__lt=<J-X>
+GET /api/project/?status__in=22454,22439&update_date__lte=<J-X>
 ```
 
-→ récap mail (nom du lieu, statut, jours d'inactivité, lien fiche). Cron 1×/jour.
+→ récap mail via Resend (titre date, statut, jours d'inactivité, lien fiche). Cron 1×/jour.
 
 Script : `dormant_dates.py`
 
