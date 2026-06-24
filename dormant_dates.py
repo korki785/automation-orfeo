@@ -1,15 +1,15 @@
 """
 Dates dormantes — notifie par email les dates Orfeo sans activité depuis X jours.
-Statuts surveillés : Intérêt, En négociation.
+Statuts surveillés : Intérêt, Option.
 
 Variables d'environnement requises :
-    ORFEO_TOKEN      Token API Orfeo
-    RESEND_API_KEY   Clé API Resend (resend.com)
-    EMAIL_FROM       Adresse expéditeur (ex: orfeo@maisondarwish.com)
-    EMAIL_TO         Adresse destinataire
+    ORFEO_TOKEN          Token API Orfeo
+    GMAIL_USER           Adresse Gmail expéditeur (ex: toi@gmail.com)
+    GMAIL_APP_PASSWORD   Mot de passe d'application Gmail (16 caractères)
+    EMAIL_TO             Adresse destinataire
 
 Optionnelles :
-    SEUIL_JOURS      Jours sans activité avant alerte (défaut : 7)
+    SEUIL_JOURS          Jours sans activité avant alerte (défaut : 7)
 
 Usage :
     python3 dormant_dates.py [--dry-run]
@@ -19,15 +19,16 @@ import os
 import sys
 import time
 import argparse
+import smtplib
 import requests
 from datetime import date, datetime, timedelta
+from email.mime.text import MIMEText
 
 BASE_URL = "https://orfeoapp.com/api"
-RESEND_URL = "https://api.resend.com/emails"
 
 TOKEN = os.environ.get("ORFEO_TOKEN", "")
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
+GMAIL_USER = os.environ.get("GMAIL_USER", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "")
 SEUIL_JOURS = int(os.environ.get("SEUIL_JOURS", "7"))
 
@@ -106,23 +107,13 @@ def build_email(dormantes, statuts_par_pk):
 
 
 def send_email(subject, body):
-    r = requests.post(
-        RESEND_URL,
-        headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "from": EMAIL_FROM,
-            "to": [EMAIL_TO],
-            "subject": subject,
-            "text": body,
-        },
-        timeout=15,
-    )
-    if r.status_code not in (200, 201):
-        print(f"Erreur Resend HTTP {r.status_code} : {r.text}")
-        sys.exit(1)
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = GMAIL_USER
+    msg["To"] = EMAIL_TO
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        smtp.sendmail(GMAIL_USER, EMAIL_TO, msg.as_string())
 
 
 def main():
@@ -134,8 +125,8 @@ def main():
     if not TOKEN:
         print("ERREUR : ORFEO_TOKEN non défini.")
         sys.exit(1)
-    if not args.dry_run and not all([RESEND_API_KEY, EMAIL_FROM, EMAIL_TO]):
-        print("ERREUR : RESEND_API_KEY, EMAIL_FROM et EMAIL_TO sont requis.")
+    if not args.dry_run and not all([GMAIL_USER, GMAIL_APP_PASSWORD, EMAIL_TO]):
+        print("ERREUR : GMAIL_USER, GMAIL_APP_PASSWORD et EMAIL_TO sont requis.")
         sys.exit(1)
 
     # 1. Récupérer les statuts

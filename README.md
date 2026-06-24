@@ -181,9 +181,11 @@ Statuts surveillés : `Intérêt` (pk=22454), `Option` (pk=22439).
 GET /api/project/?status__in=22454,22439&update_date__lte=<J-X>
 ```
 
-→ récap mail via Resend (titre date, statut, jours d'inactivité, lien fiche). Cron 1×/jour.
+→ récap mail via Gmail SMTP (titre date, statut, jours d'inactivité, lien fiche).
+Se déclenche au premier démarrage de session de la semaine (LaunchAgent macOS).
+Ne s'envoie qu'une seule fois par semaine même si le Mac redémarre plusieurs fois.
 
-Script : `dormant_dates.py`
+Scripts : `dormant_dates.py` + `run_dormant.sh`
 
 ### Détail #2 — Enrichissement des fiches
 
@@ -225,26 +227,33 @@ programmés, capacité, type) → score 0-100 + justification → PATCH dans Orf
 
 ## 8. Configuration
 
+Toutes les variables sont à placer dans un fichier `.env` à la racine (jamais committé) :
+
+```
+ORFEO_TOKEN=ton_token_orfeo
+ANTHROPIC_API_KEY=ta_clé_api_claude
+
+# Automation #1
+GMAIL_USER=tonemail@gmail.com
+GMAIL_APP_PASSWORD=motdepasse16caracteres
+EMAIL_TO=destinataire@domaine.com
+SEUIL_JOURS=7
+```
+
+Voir `.env.example` pour le modèle complet.
+
+### Déclenchement automatique (macOS)
+
+Le script se lance au premier démarrage de session de chaque semaine via un LaunchAgent :
+
+```
+~/Library/LaunchAgents/com.maisondarwish.orfeo.dormant.plist
+```
+
+Pour l'installer sur une nouvelle machine :
 ```bash
-# Variables d'environnement requises
-export ORFEO_TOKEN="<ton_token_orfeo>"
-export ANTHROPIC_API_KEY="<ta_clé_api_claude>"   # pour scoring / structuration
-
-# Pour l'automation #1 (email)
-export EMAIL_FROM="<ton_adresse_gmail>"
-export EMAIL_TO="<destinataire>"
-export GMAIL_APP_PASSWORD="<mot_de_passe_application_gmail>"
-
-# Optionnel
-export SEUIL_JOURS="7"   # jours sans activité avant alerte (défaut : 7)
-```
-
-`.gitignore` minimal :
-```
-.env
-__pycache__/
-*.pyc
-secrets/
+cp com.maisondarwish.orfeo.dormant.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.maisondarwish.orfeo.dormant.plist
 ```
 
 ---
@@ -255,4 +264,5 @@ secrets/
 |---|---|
 | `diagnostic.py` | Vérifie l'auth, liste statuts et champs custom, teste un PATCH |
 | `setup_orfeo.py` | Crée les 3 champs de scoring manquants (idempotent) |
-| `dormant_dates.py` | Notification quotidienne des dates sans activité *(en cours)* |
+| `dormant_dates.py` | Notification hebdomadaire des dates sans activité ✅ |
+| `run_dormant.sh` | Wrapper : charge le .env, vérifie si déjà lancé cette semaine |
