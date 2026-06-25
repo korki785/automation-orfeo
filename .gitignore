@@ -1,6 +1,17 @@
+# Secrets / environnement (toutes les variantes sauf le modèle)
 .env
+.env.*
+!.env.example
+secrets/
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
-secrets/
+
+# Fichiers d'état & logs générés
+.derniere_semaine
+*.log
+
+# macOS
 .DS_Store
