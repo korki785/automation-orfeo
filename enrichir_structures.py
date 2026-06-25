@@ -2,27 +2,29 @@
 Enrichissement des fiches lieux (structure) Orfeo — automation #2.
 
 Repère les structures à l'adresse incomplète, cherche les infos manquantes sur
-le web via l'API Claude (web search), puis applique une logique en deux bacs :
+le web via l'API Claude (web search), puis applique une logique en deux bacs.
 
-  • Bac « fiable »   → écriture directe dans Orfeo (PATCH). Reproduit la saisie
-                       manuelle observée sur les fiches déjà enrichies :
-                         - address1, zipcode  → trouvés par Claude (texte)
-                         - department_id, region, country_id → DÉDUITS du code
-                           postal via les référentiels Orfeo (aucune invention).
-                       Uniquement si le champ est vide ET la confiance « haute ».
-  • Bac « à valider » → email générique, téléphone, site web, type de lieu, style
-                       musical, contact programmateur. JAMAIS écrits en auto :
-                       exportés dans un CSV avec source + niveau de confiance.
+  • Bac « fiable » → écriture directe dans Orfeo, RÉSERVÉE AUX LIEUX FRANÇAIS :
+        - address1, zipcode      → trouvés par Claude (texte), si vides
+        - region                 → DÉDUITE du code postal (référentiels Orfeo)
+        - notes                  → court récap de contexte, si notes vide
+        - tags                   → tags PRÉEXISTANTS pertinents (type de lieu,
+                                   styles), choisis parmi le vocabulaire Orfeo,
+                                   fusionnés avec les tags déjà posés
+        - contacts (téléphone, mail générique) → POST /entitycontactinfo/
+  • Bac « à valider » → site web, contact programmateur (nom+mail direct), et —
+        pour les lieux étrangers — l'adresse/les contacts non écrits. Exporté en
+        CSV avec source + niveau de confiance. JAMAIS écrit automatiquement.
 
 Faits Orfeo vérifiés :
-  - region / department_id / country_id sont des ID entiers (clés étrangères),
-    pas du texte. department_id se déduit des 2 premiers chiffres du code postal
-    (le code département), region via la table département→région, country=France=3.
-  - Les contacts vivent dans `contact_infos` (sous-objet), pas en champs plats :
-    ils restent donc dans le bac « à valider » pour l'instant.
+  - region écrivable ; department_id / country_id read-only (dérivés serveur).
+    Écrire l'adresse d'un lieu ÉTRANGER peut effacer son country_id dérivé →
+    l'écriture auto est donc réservée aux lieux français.
+  - tags : champ marqué read-only en OPTIONS mais PATCH {"tags":[pk,…]} fonctionne.
+    Toujours fusionner ; n'utiliser que des tags préexistants (/entitytag/).
+  - contacts : POST /entitycontactinfo/ {type:'phone'|'mail', value, entity}.
 
-Règle absolue : ne jamais inventer. Info introuvable → null / « non_trouve »,
-jamais écrite.
+Règle absolue : ne jamais inventer. Info introuvable → null / « non_trouve ».
 
 Sécurité : SANS --apply, aucune écriture (mode aperçu). Le CSV est toujours produit.
 
@@ -34,7 +36,7 @@ Variables d'environnement :
 Usage :
     python3 enrichir_structures.py --list-only            # liste les lieux incomplets (gratuit)
     python3 enrichir_structures.py --limit 3              # aperçu enrichi (aucune écriture)
-    python3 enrichir_structures.py --limit 3 --apply      # écrit les champs fiables dans Orfeo
+    python3 enrichir_structures.py --limit 3 --apply      # écrit dans Orfeo
 """
 
 import os
@@ -48,7 +50,6 @@ import requests
 BASE_URL = "https://orfeoapp.com/api"
 TOKEN = os.environ.get("ORFEO_TOKEN", "")
 # Modèle par défaut : le moins cher (Haiku 4.5, ~1$/5$ par M tokens).
-# Surchargeable via ENRICH_MODEL (ex : claude-sonnet-4-6, claude-opus-4-8).
 MODEL = os.environ.get("ENRICH_MODEL", "claude-haiku-4-5")
 
 # L'outil web search « dynamique » (_20260209) n'existe que sur Opus 4.6+/Sonnet 4.6.
@@ -60,10 +61,9 @@ MODELES_WEBSEARCH_DYNAMIQUE = (
 CSV_A_VALIDER = "enrichissement_a_valider.csv"
 CSV_APPLIQUE = "enrichissement_applique.csv"
 
-COUNTRY_FRANCE_PK = 3  # /country/ code=FR
+COUNTRY_FRANCE_PK = 3
 
-# Table code département (FR) → nom de région, telle qu'orthographiée dans Orfeo.
-# Utilisée pour déduire region/department à partir du code postal, sans invention.
+# Table code département (FR) → nom de région (orthographe Orfeo).
 DEPTS_PAR_REGION = {
     "Auvergne-Rhône-Alpes": ["01", "03", "07", "15", "26", "38", "42", "43", "63", "69", "73", "74"],
     "Bourgogne-Franche-Comté": ["21", "25", "39", "58", "70", "71", "89", "90"],
@@ -82,26 +82,27 @@ DEPTS_PAR_REGION = {
 }
 CODE_DEPT_VERS_REGION = {code: region for region, codes in DEPTS_PAR_REGION.items() for code in codes}
 
-# Schéma de sortie imposé à Claude. region/department/country sont DÉDUITS côté
-# script à partir du code postal : Claude ne renvoie que de l'adresse texte.
+# Tags internes (workflow / artistes / budgets) à NE JAMAIS assigner automatiquement.
+# Liste en minuscules. Tout le reste du vocabulaire /entitytag/ est assignable
+# (types de lieu, styles musicaux, rôles).
+TAGS_INTERNES = {
+    "budget 10k", "budget 12k", "budget 15k",
+    "gipsy kings proposés", "gk casino tour", "gk fest", "gk smac tour",
+    "int gipsy kings", "int gk", "int joy womack", "joy proposée",
+    "kalvin love tour", "los mirlos proposés", "los mirlos tour", "make tour",
+    "propose gipsy kings", "propose jean castel", "propose joy womack",
+    "propose jungle sauce", "propose magic city hippies", "propose makéda manne",
+    "mail only", "location uniquement", "rencontre", "semestre", "s2m",
+    "damsec", "eat", "agent", "agents", "artist",
+}
+
 CONFIANCE = {"type": "string", "enum": ["haute", "moyenne", "basse", "non_trouve"]}
 
 SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["adresse", "contact", "profil", "programmateur", "resume"],
+    "required": ["adresse", "contact", "programmateur", "resume", "tags"],
     "properties": {
-        "resume": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["texte", "source", "confiance"],
-            "properties": {
-                # Récap court (1-2 phrases) : ce qu'est le lieu et ce qu'il fait.
-                "texte": {"type": ["string", "null"]},
-                "source": {"type": "string"},
-                "confiance": CONFIANCE,
-            },
-        },
         "adresse": {
             "type": "object",
             "additionalProperties": False,
@@ -127,17 +128,6 @@ SCHEMA = {
                 "confiance": CONFIANCE,
             },
         },
-        "profil": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["type_lieu", "style_musical", "source", "confiance"],
-            "properties": {
-                "type_lieu": {"type": ["string", "null"]},
-                "style_musical": {"type": ["string", "null"]},
-                "source": {"type": "string"},
-                "confiance": CONFIANCE,
-            },
-        },
         "programmateur": {
             "type": "object",
             "additionalProperties": False,
@@ -149,6 +139,18 @@ SCHEMA = {
                 "confiance": CONFIANCE,
             },
         },
+        "resume": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["texte", "source", "confiance"],
+            "properties": {
+                "texte": {"type": ["string", "null"]},
+                "source": {"type": "string"},
+                "confiance": CONFIANCE,
+            },
+        },
+        # Tags pertinents choisis PARMI le vocabulaire Orfeo fourni dans le prompt.
+        "tags": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -164,7 +166,6 @@ def vide(valeur):
 
 
 def propre(valeur):
-    """Nettoie les valeurs texte renvoyées par le modèle (espaces parasites)."""
     return valeur.strip() if isinstance(valeur, str) else valeur
 
 
@@ -185,8 +186,7 @@ def get_all(path):
 
 
 def structures_incompletes(limite, skip=0):
-    """Retourne `limite` structures dont au moins un champ d'adresse
-    (address1/zipcode/region) est vide, après en avoir sauté `skip`."""
+    """Retourne `limite` structures à l'adresse incomplète, après en avoir sauté `skip`."""
     candidates = []
     besoin = skip + limite
     url = f"{BASE_URL}/structure/?page_size=100"
@@ -210,6 +210,18 @@ def patch_structure(pk, payload):
                           json=payload, timeout=15)
 
 
+def contacts_existants(pk):
+    r = requests.get(f"{BASE_URL}/entitycontactinfo/?entity={pk}", headers=orfeo_headers(), timeout=15)
+    r.raise_for_status()
+    d = r.json()
+    return d.get("results", d if isinstance(d, list) else [])
+
+
+def creer_contact(pk, type_, value):
+    return requests.post(f"{BASE_URL}/entitycontactinfo/", headers=orfeo_headers(),
+                         json={"type": type_, "value": value, "entity": pk}, timeout=15)
+
+
 # ── Référentiels (chargés une fois) ──────────────────────────────────────────
 
 class Referentiels:
@@ -219,11 +231,15 @@ class Referentiels:
         regs = get_all("/region/")
         self.region_pk_par_nom = {r["name"]: r["pk"] for r in regs if r.get("name")}
         pays = get_all("/country/")
-        # Pays indexés par nom (français) en minuscules, pour résoudre les lieux étrangers.
         self.country_pk_par_nom = {c["name"].lower(): c["pk"] for c in pays if c.get("name")}
+        tags = get_all("/entitytag/")
+        self.tag_pk_par_nom = {t["name"].strip().lower(): t["pk"] for t in tags if t.get("name")}
+        # Vocabulaire proposé à Claude : tous les tags sauf les internes.
+        self.tags_assignables = sorted(
+            t["name"] for t in tags if t.get("name") and t["name"].strip().lower() not in TAGS_INTERNES
+        )
 
     def code_dept_depuis_zip(self, zipcode):
-        """Code département (FR) à partir d'un code postal. DROM = 3 chiffres."""
         z = (zipcode or "").strip()
         if len(z) < 2 or not z[:2].isdigit():
             return None
@@ -231,15 +247,20 @@ class Referentiels:
             return z[:3]
         return z[:2]
 
-    def resoudre_geo(self, zipcode):
-        """Déduit (department_id, region_id) du code postal. None si non résolu."""
+    def region_depuis_zip(self, zipcode):
         code = self.code_dept_depuis_zip(zipcode)
         if not code:
-            return None, None
-        dept_pk = self.dept_pk_par_code.get(code)
+            return None
         region_nom = CODE_DEPT_VERS_REGION.get(code)
-        region_pk = self.region_pk_par_nom.get(region_nom) if region_nom else None
-        return dept_pk, region_pk
+        return self.region_pk_par_nom.get(region_nom) if region_nom else None
+
+    def tag_pk(self, nom):
+        """pk d'un tag à partir de son nom, seulement s'il est préexistant ET
+        non interne. None sinon (jamais d'invention/de tag interne)."""
+        cle = (nom or "").strip().lower()
+        if cle in TAGS_INTERNES:
+            return None
+        return self.tag_pk_par_nom.get(cle)
 
 
 # ── Claude (recherche web + sortie structurée) ───────────────────────────────
@@ -249,10 +270,11 @@ def web_search_tool():
     return {"type": version, "name": "web_search", "max_uses": 5}
 
 
-def enrichir_via_claude(client, struct):
+def enrichir_via_claude(client, struct, refs):
     nom = struct.get("name") or "(nom inconnu)"
     ville = struct.get("city") or "(ville inconnue)"
     adresse = struct.get("address1") or "(adresse inconnue)"
+    vocab = ", ".join(refs.tags_assignables)
 
     prompt = (
         "Tu es un assistant de recherche pour une agence de booking de spectacles "
@@ -262,15 +284,18 @@ def enrichir_via_claude(client, struct):
         f"- Ville : {ville}\n"
         f"- Adresse connue : {adresse}\n\n"
         "RÈGLE ABSOLUE : ne jamais inventer. Si une information est introuvable ou "
-        "incertaine, mets sa valeur à null et la confiance correspondante à "
-        "\"non_trouve\". Un champ vide honnête vaut mieux qu'une donnée inventée. "
-        "Pour l'adresse : donne la rue (address1), le code postal (zipcode), la "
-        "ville seule sans le pays (city) et le pays (pays). "
-        "Pour \"resume\" : 1 à 2 phrases en français décrivant ce qu'est le lieu et "
-        "ce qu'il fait (type de structure, jauge si connue, type de programmation). "
+        "incertaine, mets sa valeur à null et la confiance à \"non_trouve\". "
+        "Pour l'adresse : rue (address1), code postal (zipcode), ville seule sans "
+        "le pays (city), pays (pays). "
+        "Pour \"resume\" : 1 à 2 phrases décrivant ce qu'est le lieu et ce qu'il fait "
+        "(type, jauge si connue, type de programmation). "
+        "Pour \"tags\" : choisis UNIQUEMENT dans cette liste les tags qui décrivent "
+        "la NATURE du lieu (type d'établissement et styles musicaux programmés). "
+        "N'invente aucun tag, n'en mets aucun hors de cette liste, et reste sobre "
+        "(2 à 5 tags pertinents). Liste autorisée : "
+        f"{vocab}.\n"
         "Privilégie les coordonnées professionnelles (cadre B2B / RGPD). "
-        "Pour chaque bloc, cite la source (URL) dans \"source\" et donne un niveau "
-        "de confiance honnête."
+        "Cite la source (URL) de chaque bloc."
     )
 
     messages = [{"role": "user", "content": prompt}]
@@ -302,37 +327,22 @@ def enrichir_via_claude(client, struct):
 # ── Logique des deux bacs ────────────────────────────────────────────────────
 
 def champs_fiables_a_ecrire(struct, enrichi, refs):
-    """Bac fiable : champs d'adresse vides dans Orfeo, trouvés en confiance « haute ».
-    address1/zipcode viennent de Claude ; department/region/country sont déduits."""
+    """Champs structure à PATCHer (hors tags). Lieux FRANÇAIS uniquement."""
     adr = enrichi.get("adresse", {})
-    pays = (adr.get("pays") or "").strip().lower()
-    est_france = pays == "france"
-
-    # SÉCURITÉ : écriture automatique réservée aux lieux FRANÇAIS. Sur un lieu
-    # étranger, écrire l'adresse fait recalculer côté serveur les champs géo
-    # dérivés (country_id/department_id, read-only) et peut les EFFACER
-    # (régression observée : un lieu autrichien a perdu son country_id).
-    # Les lieux étrangers passent donc uniquement par le bac « à valider » (CSV).
-    if not est_france:
+    if (adr.get("pays") or "").strip().lower() != "france":
         return {}
 
     a_ecrire = {}
-    # 1. Adresse : seulement si trouvée en confiance « haute ».
     if adr.get("confiance") == "haute":
         for champ in ("address1", "zipcode"):
             valeur = propre(adr.get(champ))
             if vide(struct.get(champ)) and not vide(valeur):
                 a_ecrire[champ] = valeur
-
-        # 2. region : DÉDUITE du code postal. Seul champ géo écrivable
-        #    (department_id / country_id sont read-only côté Orfeo).
         zip_ref = a_ecrire.get("zipcode") or struct.get("zipcode")
-        _, region_pk = refs.resoudre_geo(zip_ref)
+        region_pk = refs.region_depuis_zip(zip_ref)
         if region_pk and vide(struct.get("region")):
             a_ecrire["region"] = region_pk
 
-    # 3. Notes : récap de contexte. Écrit UNIQUEMENT si les notes sont vides —
-    #    on ne touche jamais à une note de booking existante.
     resume = enrichi.get("resume", {})
     texte = propre(resume.get("texte"))
     if vide(struct.get("notes")) and not vide(texte) and resume.get("confiance") in ("haute", "moyenne"):
@@ -341,30 +351,69 @@ def champs_fiables_a_ecrire(struct, enrichi, refs):
     return a_ecrire
 
 
-def lignes_a_valider(struct, enrichi):
-    """Bac à valider : email/téléphone/site/type/style/programmateur, avec source
-    et confiance. Jamais écrit en auto (contacts = sous-objet contact_infos)."""
+def est_francais(enrichi):
+    return (enrichi.get("adresse", {}).get("pays") or "").strip().lower() == "france"
+
+
+def tags_a_ajouter(struct, enrichi, refs):
+    """pks de tags préexistants à ajouter (hors internes, hors déjà posés).
+    Réservé aux lieux français pour rester cohérent avec l'écriture auto."""
+    if not est_francais(enrichi):
+        return []
+    deja = {t.get("pk") for t in (struct.get("tags") or [])}
+    pks = []
+    for nom in enrichi.get("tags", []) or []:
+        pk = refs.tag_pk(nom)
+        if pk and pk not in deja and pk not in pks:
+            pks.append(pk)
+    return pks
+
+
+def contacts_a_creer(struct, enrichi, existants):
+    """[(type, value)] téléphone + mail générique à créer (confiance haute,
+    non déjà présents). Lieux français uniquement."""
+    if not est_francais(enrichi):
+        return []
+    c = enrichi.get("contact", {})
+    if c.get("confiance") != "haute":
+        return []
+    norm = lambda v: (v or "").replace(" ", "").lower()
+    deja = {(x.get("type"), norm(x.get("value"))) for x in existants}
+    sortie = []
+    for typ, champ in (("phone", "telephone"), ("mail", "email_generique")):
+        val = propre(c.get(champ))
+        if not vide(val) and (typ, norm(val)) not in deja:
+            sortie.append((typ, val))
+    return sortie
+
+
+def lignes_a_valider(struct, enrichi, ecrit_auto):
+    """Bac à valider : site web + programmateur (toujours), et — si le lieu n'est
+    pas auto-enrichi (étranger) — l'adresse et les contacts non écrits."""
     pk = struct.get("pk") or struct.get("id")
     nom = struct.get("name")
     lignes = []
-    for bloc, champs in (
-        ("contact", ["email_generique", "telephone", "site_web"]),
-        ("profil", ["type_lieu", "style_musical"]),
-        ("programmateur", ["nom", "email"]),
-    ):
-        b = enrichi.get(bloc, {})
-        for champ in champs:
-            valeur = propre(b.get(champ))
-            if not vide(valeur):
-                lignes.append({
-                    "structure_pk": pk,
-                    "structure_nom": nom,
-                    "bloc": bloc,
-                    "champ": champ,
-                    "valeur": valeur,
-                    "source": b.get("source") or "",
-                    "confiance": b.get("confiance") or "",
-                })
+
+    def ajoute(bloc, champ, valeur, b):
+        if not vide(propre(valeur)):
+            lignes.append({
+                "structure_pk": pk, "structure_nom": nom, "bloc": bloc, "champ": champ,
+                "valeur": propre(valeur), "source": b.get("source") or "",
+                "confiance": b.get("confiance") or "",
+            })
+
+    contact = enrichi.get("contact", {})
+    prog = enrichi.get("programmateur", {})
+    ajoute("contact", "site_web", contact.get("site_web"), contact)
+    ajoute("programmateur", "nom", prog.get("nom"), prog)
+    ajoute("programmateur", "email", prog.get("email"), prog)
+
+    if not ecrit_auto:  # lieu étranger : rien n'a été écrit, tout va en validation
+        adr = enrichi.get("adresse", {})
+        for champ in ("address1", "zipcode", "city", "pays"):
+            ajoute("adresse", champ, adr.get(champ), adr)
+        ajoute("contact", "email_generique", contact.get("email_generique"), contact)
+        ajoute("contact", "telephone", contact.get("telephone"), contact)
     return lignes
 
 
@@ -375,9 +424,9 @@ def main():
     parser.add_argument("--limit", type=int, default=10,
                         help="Nombre de lieux incomplets à traiter (défaut : 10)")
     parser.add_argument("--skip", type=int, default=0,
-                        help="Sauter les N premiers lieux incomplets (pour cibler d'autres exemples)")
+                        help="Sauter les N premiers lieux incomplets")
     parser.add_argument("--apply", action="store_true",
-                        help="Écrit réellement les champs fiables dans Orfeo (sinon aperçu seul)")
+                        help="Écrit réellement dans Orfeo (sinon aperçu seul)")
     parser.add_argument("--list-only", action="store_true",
                         help="Liste seulement les lieux incomplets, sans appeler Claude (gratuit)")
     args = parser.parse_args()
@@ -396,21 +445,19 @@ def main():
     if args.list_only:
         for s in candidats:
             manquants = [c for c in ("address1", "zipcode", "region") if vide(s.get(c))]
-            pk = s.get("pk") or s.get("id")
-            print(f"  • {s.get('name')} ({s.get('city')}) — pk={pk} — manque : {', '.join(manquants)}")
+            print(f"  • {s.get('name')} ({s.get('city')}) — pk={s.get('pk') or s.get('id')} "
+                  f"— manque : {', '.join(manquants)}")
         print("\n(--list-only : aucun appel Claude, aucune écriture.)")
         return
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
+    if not os.environ.get("ANTHROPIC_API_KEY", ""):
         print("ERREUR : ANTHROPIC_API_KEY non défini (requis hors --list-only).")
-        print("Ajoute-le dans le .env, puis relance. Ou utilise --list-only pour un aperçu gratuit.")
         sys.exit(1)
 
     import anthropic
     client = anthropic.Anthropic()
 
-    print("Chargement des référentiels Orfeo (départements, régions)…")
+    print("Chargement des référentiels Orfeo (départements, régions, tags)…")
     refs = Referentiels()
 
     mode = "ÉCRITURE RÉELLE (--apply)" if args.apply else "APERÇU (aucune écriture)"
@@ -423,39 +470,61 @@ def main():
         pk = s.get("pk") or s.get("id")
         nom = s.get("name")
         print(f"→ {nom} ({s.get('city')}) [pk={pk}]")
-        enrichi = enrichir_via_claude(client, s)
+        enrichi = enrichir_via_claude(client, s, refs)
         if not enrichi:
             print("    ⚠  Pas de résultat exploitable.")
             continue
 
         adr = enrichi.get("adresse", {})
-        print(f"    adresse trouvée (confiance {adr.get('confiance')}): "
-              f"{adr.get('address1')!r}, {adr.get('zipcode')!r}, {adr.get('city')!r}")
+        print(f"    adresse (confiance {adr.get('confiance')}): "
+              f"{adr.get('address1')!r}, {adr.get('zipcode')!r}, {adr.get('city')!r}, {adr.get('pays')!r}")
         resume = enrichi.get("resume", {})
         if resume.get("texte"):
-            print(f"    résumé (confiance {resume.get('confiance')}): {resume.get('texte')}")
+            print(f"    résumé: {propre(resume.get('texte'))[:90]}…")
 
         fiables = champs_fiables_a_ecrire(s, enrichi, refs)
-        if fiables:
+        tag_pks = tags_a_ajouter(s, enrichi, refs)
+        tag_noms = [n for n in (enrichi.get("tags") or []) if refs.tag_pk(n) in tag_pks]
+        existants = contacts_existants(pk) if est_francais(enrichi) else []
+        contacts = contacts_a_creer(s, enrichi, existants)
+
+        payload = dict(fiables)
+        if tag_pks:
+            deja = {t.get("pk") for t in (s.get("tags") or [])}
+            payload["tags"] = sorted(deja | set(tag_pks))
+
+        if payload:
             apercu = ", ".join(f"{k}={v!r}" for k, v in fiables.items())
+            if tag_pks:
+                apercu += (", " if apercu else "") + f"tags+={tag_noms}"
             if args.apply:
-                r = patch_structure(pk, fiables)
+                r = patch_structure(pk, payload)
                 if r.status_code in (200, 201):
-                    print(f"    ✓ Écrit : {apercu}")
-                    lignes_appliquees.append({"structure_pk": pk, "structure_nom": nom, **fiables})
+                    print(f"    ✓ Structure écrite : {apercu}")
+                    lignes_appliquees.append({"structure_pk": pk, "structure_nom": nom,
+                                              **fiables, "tags_ajoutes": ";".join(tag_noms)})
                 else:
                     print(f"    ✗ Échec PATCH HTTP {r.status_code} : {r.text[:160]}")
                 time.sleep(0.12)
             else:
-                print(f"    [aperçu] serait écrit : {apercu}")
+                print(f"    [aperçu] structure : {apercu}")
         else:
-            print("    (aucun champ fiable à écrire — confiance insuffisante ou déjà rempli)")
+            print("    (rien à écrire sur la structure)")
 
-        a_valider = lignes_a_valider(s, enrichi)
+        if contacts:
+            for typ, val in contacts:
+                if args.apply:
+                    rc = creer_contact(pk, typ, val)
+                    ok = rc.status_code in (200, 201)
+                    print(f"    {'✓' if ok else '✗'} contact {typ}: {val}"
+                          + ("" if ok else f" (HTTP {rc.status_code})"))
+                    time.sleep(0.12)
+                else:
+                    print(f"    [aperçu] contact {typ}: {val}")
+
+        a_valider = lignes_a_valider(s, enrichi, est_francais(enrichi))
         if a_valider:
-            print(f"    {len(a_valider)} info(s) à valider :")
-            for l in a_valider:
-                print(f"        - {l['champ']}: {l['valeur']!r} (confiance {l['confiance']})")
+            print(f"    {len(a_valider)} info(s) à valider (CSV)")
             toutes_lignes_valider.extend(a_valider)
         print()
 
@@ -464,7 +533,7 @@ def main():
             w = csv.DictWriter(f, fieldnames=list(toutes_lignes_valider[0].keys()))
             w.writeheader()
             w.writerows(toutes_lignes_valider)
-        print(f"→ {len(toutes_lignes_valider)} ligne(s) à valider écrites dans {CSV_A_VALIDER}")
+        print(f"→ {len(toutes_lignes_valider)} ligne(s) à valider dans {CSV_A_VALIDER}")
 
     if lignes_appliquees:
         with open(CSV_APPLIQUE, "w", newline="", encoding="utf-8") as f:
