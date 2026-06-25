@@ -62,24 +62,34 @@ def fetch_statuts():
 
 
 def fetch_dormant_dates(status_pks):
-    seuil = (date.today() - timedelta(days=SEUIL_JOURS)).isoformat()
+    # Note : Orfeo n'expose pas de date d'activité fiable — `update_date` est
+    # souvent null. Le filtre serveur `update_date__lte` laisse alors tout passer.
+    # On filtre donc côté client sur `update_date or creation_date`.
     pk_list = ",".join(str(pk) for pk in status_pks)
-    return get_all("/project/", {
+    projets = get_all("/project/", {
         "status__in": pk_list,
-        "update_date__lte": seuil,
         "page_size": "100",
     })
+    return [p for p in projets if _inactivite_jours(p) >= SEUIL_JOURS]
 
 
-def days_since(project):
+def _inactivite_jours(project):
+    """Jours d'inactivité = jours depuis la dernière activité connue.
+    Dernière activité = update_date si présent, sinon creation_date.
+    Retourne -1 si aucune date exploitable (jamais considéré comme dormant)."""
     raw = project.get("update_date") or project.get("creation_date")
     if not raw:
-        return "?"
+        return -1
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         return (date.today() - dt.date()).days
     except Exception:
-        return "?"
+        return -1
+
+
+def days_since(project):
+    jours = _inactivite_jours(project)
+    return jours if jours >= 0 else "?"
 
 
 def build_email(dormantes, statuts_par_pk):
