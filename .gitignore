@@ -12,6 +12,11 @@ __pycache__/
 # Fichiers d'état & logs générés
 .derniere_semaine
 *.log
+enrichissement_*.csv
+
+# Helpers locaux / scripts jetables (ne jamais committer — peuvent contenir des secrets)
+ajouter_cle.sh
+push_accor_test.py
 
 # macOS
 .DS_Store
