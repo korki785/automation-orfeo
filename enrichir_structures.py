@@ -205,6 +205,19 @@ def structures_incompletes(limite, skip=0):
     return candidates[skip:skip + limite]
 
 
+def structures_par_pks(pks):
+    """Retourne les structures correspondant à une liste de pk explicites."""
+    out = []
+    for pk in pks:
+        r = requests.get(f"{BASE_URL}/structure/{pk}/", headers=orfeo_headers(), timeout=15)
+        if r.status_code == 200:
+            out.append(r.json())
+        else:
+            print(f"  ⚠  pk={pk} introuvable (HTTP {r.status_code})")
+        time.sleep(0.12)
+    return out
+
+
 def patch_structure(pk, payload):
     return requests.patch(f"{BASE_URL}/structure/{pk}/", headers=orfeo_headers(),
                           json=payload, timeout=15)
@@ -429,14 +442,22 @@ def main():
                         help="Écrit réellement dans Orfeo (sinon aperçu seul)")
     parser.add_argument("--list-only", action="store_true",
                         help="Liste seulement les lieux incomplets, sans appeler Claude (gratuit)")
+    parser.add_argument("--pks", type=str, default="",
+                        help="Cible des structures précises par pk (liste séparée par des virgules). "
+                             "Ignore --limit/--skip et la détection automatique.")
     args = parser.parse_args()
 
     if not TOKEN:
         print("ERREUR : ORFEO_TOKEN non défini.")
         sys.exit(1)
 
-    print(f"Recherche des lieux incomplets (max {args.limit}, après {args.skip} sautés)…")
-    candidats = structures_incompletes(args.limit, args.skip)
+    if args.pks:
+        pks = [p.strip() for p in args.pks.split(",") if p.strip()]
+        print(f"Ciblage explicite de {len(pks)} structure(s) par pk…")
+        candidats = structures_par_pks(pks)
+    else:
+        print(f"Recherche des lieux incomplets (max {args.limit}, après {args.skip} sautés)…")
+        candidats = structures_incompletes(args.limit, args.skip)
     if not candidats:
         print("Aucun lieu incomplet trouvé. Rien à faire.")
         return
