@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root { --fg:#1d1d1f; --mut:#6b6b70; --line:#e3e3e6; --accent:#0a7c4a; --bad:#c0392b; }
+    * { box-sizing: border-box; }
+    body { width: 380px; margin: 0; font: 13px/1.45 -apple-system, system-ui, sans-serif; color: var(--fg); }
+    header { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    header b { font-size: 13px; }
+    #cible { color: var(--mut); margin-top: 2px; }
+    #cible.ok { color: var(--accent); }
+    #cible.no { color: var(--bad); }
+    .corps { padding: 10px 12px; }
+    textarea { width: 100%; min-height: 54px; resize: vertical; padding: 7px 8px;
+               border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+    .row { display: flex; gap: 8px; margin-top: 8px; }
+    button { flex: 1; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+             background: #fafafa; cursor: pointer; font: inherit; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button:disabled { opacity: .5; cursor: default; }
+    #etat { color: var(--mut); margin: 8px 0 0; min-height: 16px; }
+    #etat.bad { color: var(--bad); }
+    #apercu { margin-top: 10px; }
+    .bloc { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+    .bloc h4 { margin: 0 0 5px; font-size: 12px; }
+    .kv { display: flex; gap: 6px; padding: 1px 0; }
+    .kv .k { color: var(--mut); min-width: 78px; flex: 0 0 auto; }
+    .kv .v { word-break: break-word; }
+    .tag { display: inline-block; background: #eef6f1; color: var(--accent);
+           border-radius: 6px; padding: 1px 6px; margin: 1px 3px 1px 0; }
+    .valider .k { color: var(--bad); }
+    small.note { color: var(--mut); }
+  </style>
+</head>
+<body>
+  <header>
+    <b>Enrichir la fiche Orfeo</b>
+    <div id="cible">Détection…</div>
+  </header>
+  <div class="corps">
+    <textarea id="cmd" placeholder="Ex : complète l'adresse, la ville et le style musical&#10;(Entrée = aperçu · Maj+Entrée = nouvelle ligne)"></textarea>
+    <div class="row">
+      <button id="btn-apercu" class="primary">Aperçu (Entrée)</button>
+    </div>
+    <p id="etat"></p>
+    <div id="apercu"></div>
+    <div class="row" id="row-ecrire" style="display:none">
+      <button id="btn-ecrire" class="primary">Écrire dans Orfeo</button>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

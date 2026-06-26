@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maisondarwish.orfeo.enrich</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/naeldarwish/automation-orfeo/serveur_enrichissement.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/naeldarwish/automation-orfeo</string>
+
+    <!-- Démarre à l'ouverture de session et reste actif (redémarre si il s'arrête). -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/naeldarwish/automation-orfeo/serveur_enrichissement.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/naeldarwish/automation-orfeo/serveur_enrichissement.log</string>
+</dict>
+</plist>

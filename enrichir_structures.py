@@ -283,11 +283,21 @@ def web_search_tool():
     return {"type": version, "name": "web_search", "max_uses": 5}
 
 
-def enrichir_via_claude(client, struct, refs):
+def enrichir_via_claude(client, struct, refs, commande=None):
     nom = struct.get("name") or "(nom inconnu)"
     ville = struct.get("city") or "(ville inconnue)"
     adresse = struct.get("address1") or "(adresse inconnue)"
     vocab = ", ".join(refs.tags_assignables)
+
+    # Consigne libre de l'utilisateur (extension Chrome) : oriente les champs à remplir
+    # sans jamais lever la règle anti-invention ni le cadre du schéma.
+    bloc_commande = ""
+    if commande and commande.strip():
+        bloc_commande = (
+            f"\nL'utilisateur demande spécifiquement : \"{commande.strip()}\". "
+            "Priorise ces champs dans ta recherche, mais respecte toujours le schéma "
+            "et la règle anti-invention ci-dessous.\n"
+        )
 
     prompt = (
         "Tu es un assistant de recherche pour une agence de booking de spectacles "
@@ -295,7 +305,8 @@ def enrichir_via_claude(client, struct, refs):
         "(salle de concert, festival, centre culturel) :\n\n"
         f"- Nom : {nom}\n"
         f"- Ville : {ville}\n"
-        f"- Adresse connue : {adresse}\n\n"
+        f"- Adresse connue : {adresse}\n"
+        f"{bloc_commande}\n"
         "RÈGLE ABSOLUE : ne jamais inventer. Si une information est introuvable ou "
         "incertaine, mets sa valeur à null et la confiance à \"non_trouve\". "
         "Pour l'adresse : rue (address1), code postal (zipcode), ville seule sans "
@@ -395,8 +406,13 @@ def contacts_a_creer(struct, enrichi, existants):
     sortie = []
     for typ, champ in (("phone", "telephone"), ("mail", "email_generique")):
         val = propre(c.get(champ))
-        if not vide(val) and (typ, norm(val)) not in deja:
-            sortie.append((typ, val))
+        if vide(val) or (typ, norm(val)) in deja:
+            continue
+        # La recherche web masque parfois les mails ("[email protected]") : ne jamais
+        # écrire un mail masqué/invalide. Orfeo le refuse (HTTP 500) de toute façon.
+        if typ == "mail" and ("email protected" in norm(val) or "@" not in (val or "")):
+            continue
+        sortie.append((typ, val))
     return sortie
 
 
@@ -428,6 +444,75 @@ def lignes_a_valider(struct, enrichi, ecrit_auto):
         ajoute("contact", "email_generique", contact.get("email_generique"), contact)
         ajoute("contact", "telephone", contact.get("telephone"), contact)
     return lignes
+
+
+# ── Traitement d'une structure (réutilisé par le CLI et le serveur local) ─────
+
+def appliquer_enrichissement(s, enrichi, refs, apply):
+    """À partir d'un résultat Claude `enrichi` déjà obtenu, calcule (et applique si
+    apply=True) les écritures Orfeo, et renvoie un résultat JSON-able.
+      apply=False → aperçu : `ecrit`/`tags_ajoutes` = ce qui SERAIT écrit, rien n'est patché.
+      apply=True  → écriture réelle : `ecrit`/`tags_ajoutes` = ce qui A ÉTÉ écrit (sur succès).
+    Sépare la recherche Claude de l'écriture pour que le serveur local puisse
+    prévisualiser puis appliquer LE MÊME plan sans relancer de recherche web."""
+    pk = s.get("pk") or s.get("id")
+    res = {
+        "pk": pk, "nom": s.get("name"), "ok": False, "applique": bool(apply),
+        "adresse_confiance": None, "resume": None,
+        "ecrit": {}, "tags_ajoutes": [], "contacts": [], "a_valider": [], "message": "",
+    }
+
+    if not enrichi:
+        res["message"] = "Pas de résultat exploitable."
+        return res
+
+    adr = enrichi.get("adresse", {})
+    res["adresse_confiance"] = adr.get("confiance")
+    resume = enrichi.get("resume", {})
+    res["resume"] = propre(resume.get("texte")) if resume.get("texte") else None
+
+    fiables = champs_fiables_a_ecrire(s, enrichi, refs)
+    tag_pks = tags_a_ajouter(s, enrichi, refs)
+    tag_noms = [n for n in (enrichi.get("tags") or []) if refs.tag_pk(n) in tag_pks]
+    existants = contacts_existants(pk) if est_francais(enrichi) else []
+    contacts = contacts_a_creer(s, enrichi, existants)
+
+    payload = dict(fiables)
+    if tag_pks:
+        deja = {t.get("pk") for t in (s.get("tags") or [])}
+        payload["tags"] = sorted(deja | set(tag_pks))
+
+    if payload:
+        if apply:
+            r = patch_structure(pk, payload)
+            if r.status_code in (200, 201):
+                res["ecrit"] = fiables
+                res["tags_ajoutes"] = tag_noms
+            else:
+                res["message"] += f"Échec PATCH HTTP {r.status_code} : {r.text[:160]}. "
+            time.sleep(0.12)
+        else:
+            res["ecrit"] = fiables
+            res["tags_ajoutes"] = tag_noms
+
+    for typ, val in contacts:
+        statut = "aperçu"
+        if apply:
+            rc = creer_contact(pk, typ, val)
+            statut = "ok" if rc.status_code in (200, 201) else f"HTTP {rc.status_code}"
+            time.sleep(0.12)
+        res["contacts"].append({"type": typ, "valeur": val, "statut": statut})
+
+    res["a_valider"] = lignes_a_valider(s, enrichi, est_francais(enrichi))
+    res["ok"] = True
+    return res
+
+
+def traiter_structure(s, refs, client, apply, commande=None):
+    """Recherche Claude (avec consigne libre optionnelle) puis aperçu/écriture.
+    `commande` oriente les champs sans jamais lever la règle anti-invention."""
+    enrichi = enrichir_via_claude(client, s, refs, commande=commande)
+    return appliquer_enrichissement(s, enrichi, refs, apply)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -491,62 +576,41 @@ def main():
         pk = s.get("pk") or s.get("id")
         nom = s.get("name")
         print(f"→ {nom} ({s.get('city')}) [pk={pk}]")
-        enrichi = enrichir_via_claude(client, s, refs)
-        if not enrichi:
-            print("    ⚠  Pas de résultat exploitable.")
+
+        res = traiter_structure(s, refs, client, args.apply)
+        if not res["ok"]:
+            print(f"    ⚠  {res['message'] or 'Pas de résultat exploitable.'}")
             continue
 
-        adr = enrichi.get("adresse", {})
-        print(f"    adresse (confiance {adr.get('confiance')}): "
-              f"{adr.get('address1')!r}, {adr.get('zipcode')!r}, {adr.get('city')!r}, {adr.get('pays')!r}")
-        resume = enrichi.get("resume", {})
-        if resume.get("texte"):
-            print(f"    résumé: {propre(resume.get('texte'))[:90]}…")
+        print(f"    adresse (confiance {res['adresse_confiance']})")
+        if res["resume"]:
+            print(f"    résumé: {res['resume'][:90]}…")
 
-        fiables = champs_fiables_a_ecrire(s, enrichi, refs)
-        tag_pks = tags_a_ajouter(s, enrichi, refs)
-        tag_noms = [n for n in (enrichi.get("tags") or []) if refs.tag_pk(n) in tag_pks]
-        existants = contacts_existants(pk) if est_francais(enrichi) else []
-        contacts = contacts_a_creer(s, enrichi, existants)
-
-        payload = dict(fiables)
-        if tag_pks:
-            deja = {t.get("pk") for t in (s.get("tags") or [])}
-            payload["tags"] = sorted(deja | set(tag_pks))
-
-        if payload:
-            apercu = ", ".join(f"{k}={v!r}" for k, v in fiables.items())
-            if tag_pks:
-                apercu += (", " if apercu else "") + f"tags+={tag_noms}"
+        if res["ecrit"] or res["tags_ajoutes"]:
+            apercu = ", ".join(f"{k}={v!r}" for k, v in res["ecrit"].items())
+            if res["tags_ajoutes"]:
+                apercu += (", " if apercu else "") + f"tags+={res['tags_ajoutes']}"
+            etiquette = "✓ Structure écrite" if args.apply else "[aperçu] structure"
+            print(f"    {etiquette} : {apercu}")
             if args.apply:
-                r = patch_structure(pk, payload)
-                if r.status_code in (200, 201):
-                    print(f"    ✓ Structure écrite : {apercu}")
-                    lignes_appliquees.append({"structure_pk": pk, "structure_nom": nom,
-                                              **fiables, "tags_ajoutes": ";".join(tag_noms)})
-                else:
-                    print(f"    ✗ Échec PATCH HTTP {r.status_code} : {r.text[:160]}")
-                time.sleep(0.12)
-            else:
-                print(f"    [aperçu] structure : {apercu}")
+                lignes_appliquees.append({"structure_pk": pk, "structure_nom": nom,
+                                          **res["ecrit"], "tags_ajoutes": ";".join(res["tags_ajoutes"])})
         else:
             print("    (rien à écrire sur la structure)")
+        if res["message"]:
+            print(f"    ✗ {res['message']}")
 
-        if contacts:
-            for typ, val in contacts:
-                if args.apply:
-                    rc = creer_contact(pk, typ, val)
-                    ok = rc.status_code in (200, 201)
-                    print(f"    {'✓' if ok else '✗'} contact {typ}: {val}"
-                          + ("" if ok else f" (HTTP {rc.status_code})"))
-                    time.sleep(0.12)
-                else:
-                    print(f"    [aperçu] contact {typ}: {val}")
+        for c in res["contacts"]:
+            if args.apply:
+                ok = c["statut"] == "ok"
+                print(f"    {'✓' if ok else '✗'} contact {c['type']}: {c['valeur']}"
+                      + ("" if ok else f" ({c['statut']})"))
+            else:
+                print(f"    [aperçu] contact {c['type']}: {c['valeur']}")
 
-        a_valider = lignes_a_valider(s, enrichi, est_francais(enrichi))
-        if a_valider:
-            print(f"    {len(a_valider)} info(s) à valider (CSV)")
-            toutes_lignes_valider.extend(a_valider)
+        if res["a_valider"]:
+            print(f"    {len(res['a_valider'])} info(s) à valider (CSV)")
+            toutes_lignes_valider.extend(res["a_valider"])
         print()
 
     if toutes_lignes_valider:

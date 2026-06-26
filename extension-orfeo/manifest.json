@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Orfeo — Enrichir la fiche",
+  "version": "1.0.0",
+  "description": "Enrichit la structure Orfeo affichée via une commande en français (recherche web + écriture API). Aperçu avant écriture.",
+  "permissions": ["tabs", "activeTab"],
+  "host_permissions": [
+    "http://127.0.0.1:8723/*",
+    "https://orfeoapp.com/*"
+  ],
+  "action": {
+    "default_title": "Enrichir la fiche Orfeo",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://orfeoapp.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
