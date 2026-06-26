@@ -58,6 +58,34 @@ MODELES_WEBSEARCH_DYNAMIQUE = (
     "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
 )
 
+# Prix Claude ($ / million de tokens) — input, output. Web search facturé à part.
+PRIX = {
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+}
+PRIX_WEB_SEARCH = 0.01   # ~$10 / 1000 recherches
+COUT_LOG = "cout_claude.log"
+
+
+def cout_appel(modele, resp, etiquette=""):
+    """Calcule et journalise le coût réel d'un appel Claude. Renvoie le coût en $."""
+    try:
+        u = resp.usage
+        pin, pout = PRIX.get(modele, (5.0, 25.0))
+        cin = (getattr(u, "input_tokens", 0) or 0) + (getattr(u, "cache_read_input_tokens", 0) or 0)
+        cout = getattr(u, "output_tokens", 0) or 0
+        sw = getattr(u, "server_tool_use", None)
+        recherches = getattr(sw, "web_search_requests", 0) if sw else 0
+        prix = cin / 1e6 * pin + cout / 1e6 * pout + recherches * PRIX_WEB_SEARCH
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), COUT_LOG), "a", encoding="utf-8") as f:
+            f.write(f"{etiquette}\t{modele}\tin={cin}\tout={cout}\tweb={recherches}\t${prix:.4f}\n")
+        return prix
+    except Exception:
+        return 0.0
+
+
 CSV_A_VALIDER = "enrichissement_a_valider.csv"
 CSV_APPLIQUE = "enrichissement_applique.csv"
 
@@ -278,9 +306,117 @@ class Referentiels:
 
 # ── Claude (recherche web + sortie structurée) ───────────────────────────────
 
-def web_search_tool():
-    version = "web_search_20260209" if MODEL in MODELES_WEBSEARCH_DYNAMIQUE else "web_search_20250305"
-    return {"type": version, "name": "web_search", "max_uses": 5}
+def web_search_tool(modele=None):
+    modele = modele or MODEL
+    version = "web_search_20260209" if modele in MODELES_WEBSEARCH_DYNAMIQUE else "web_search_20250305"
+    # Plafond bas : la recherche web pilote le coût (chaque recherche + ses résultats
+    # gonflent les tokens). 3 suffit pour les coordonnées d'un lieu ; configurable.
+    max_uses = int(os.environ.get("WEB_SEARCH_MAX_USES", "3"))
+    return {"type": version, "name": "web_search", "max_uses": max_uses}
+
+
+# Modèle vision pour le remplissage à l'écran (extension phase 3). Opus 4.8 = vision + web.
+VISION_MODEL = os.environ.get("VISION_MODEL", "claude-opus-4-8")
+
+# Schéma de sortie du remplissage visuel : pour chaque champ de l'écran, une valeur.
+SCHEMA_VISUEL = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["champs"],
+    "properties": {
+        "champs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["field_id", "valeur", "source", "confiance"],
+                "properties": {
+                    "field_id": {"type": "string"},
+                    "valeur": {"type": ["string", "null"]},
+                    "source": {"type": "string"},
+                    "confiance": CONFIANCE,
+                },
+            },
+        }
+    },
+}
+
+
+def enrichir_visuel_via_claude(client, struct, champs, screenshot_b64, deja, commande):
+    """Vision : à partir d'un screenshot de la fiche + de la carte des champs du
+    formulaire (découverts en direct par l'extension), renvoie une valeur par
+    field_id à remplir À L'ÉCRAN. Ne remplit jamais un champ déjà géré par l'API
+    (`deja`). Recherche web autorisée. Règle anti-invention conservée."""
+    nom = struct.get("name") or "(nom inconnu)"
+    ville = struct.get("city") or "(ville inconnue)"
+
+    lignes = []
+    for c in champs:
+        ligne = f"- id={c.get('id')} | libellé: {c.get('label') or '(sans libellé)'} | type: {c.get('type')}"
+        if c.get("value"):
+            ligne += f" | valeur actuelle: {c.get('value')!r}"
+        opts = c.get("options")
+        if opts:
+            ligne += f" | options: {', '.join(opts[:30])}"
+        lignes.append(ligne)
+    carte = "\n".join(lignes) or "(aucun champ détecté)"
+
+    deja_txt = ", ".join(deja) if deja else "(aucun)"
+    bloc_cmd = f'\nDemande de l\'utilisateur : "{commande.strip()}".\n' if (commande or "").strip() else ""
+
+    prompt = (
+        "Tu aides une agence de booking à compléter la fiche d'un lieu (salle, festival, "
+        "centre culturel) dans son CRM. Voici une capture d'écran du formulaire et la "
+        "liste des champs détectés sur la page.\n\n"
+        f"Lieu : {nom} — {ville}\n"
+        f"{bloc_cmd}\n"
+        "Champs du formulaire (remplis-les en renvoyant leur field_id exact) :\n"
+        f"{carte}\n\n"
+        f"NE REMPLIS PAS ces champs déjà gérés automatiquement par l'API : {deja_txt}.\n"
+        "RÈGLE ABSOLUE : ne jamais inventer. Si une valeur est introuvable ou incertaine, "
+        "mets valeur=null et confiance=\"non_trouve\". Ne propose une valeur que pour un "
+        "field_id présent dans la liste ci-dessus. Pour un champ à options (select), choisis "
+        "une valeur exactement parmi les options listées. Cite la source (URL) de chaque valeur. "
+        "Recherche sur le web ce qui manque (jauge, type de lieu, style, site, etc.)."
+    )
+
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": screenshot_b64}}
+    contenu = [image, {"type": "text", "text": prompt}]
+    messages = [{"role": "user", "content": contenu}]
+    tools = [web_search_tool(VISION_MODEL)]
+
+    resp = None
+    for _ in range(6):
+        resp = client.messages.create(
+            model=VISION_MODEL,
+            max_tokens=4000,
+            tools=tools,
+            output_config={"format": {"type": "json_schema", "schema": SCHEMA_VISUEL}},
+            messages=messages,
+        )
+        if resp.stop_reason == "pause_turn":
+            messages.append({"role": "assistant", "content": resp.content})
+            continue
+        break
+
+    if resp:
+        cout_appel(VISION_MODEL, resp, "vision")
+    texte = next((b.text for b in resp.content if b.type == "text"), None) if resp else None
+    if not texte:
+        return []
+    try:
+        data = json.loads(texte)
+    except json.JSONDecodeError:
+        return []
+    ids_valides = {c.get("id") for c in champs}
+    sortie = []
+    for c in (data.get("champs") or []):
+        fid = c.get("field_id")
+        val = propre(c.get("valeur"))
+        if fid in ids_valides and not vide(val) and c.get("confiance") != "non_trouve":
+            sortie.append({"field_id": fid, "valeur": val,
+                           "source": c.get("source") or "", "confiance": c.get("confiance")})
+    return sortie
 
 
 def enrichir_via_claude(client, struct, refs, commande=None):
@@ -339,6 +475,8 @@ def enrichir_via_claude(client, struct, refs, commande=None):
             continue
         break
 
+    if resp:
+        cout_appel(MODEL, resp, "api")
     texte = next((b.text for b in resp.content if b.type == "text"), None) if resp else None
     if not texte:
         return None

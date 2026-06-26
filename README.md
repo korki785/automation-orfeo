@@ -163,7 +163,7 @@ Générer le token dans Orfeo (page « API & webhooks ») et le placer dans `ORF
 | # | Automatisation | Complexité | ROI | Statut |
 |---|----------------|-----------|-----|--------|
 | 1 | Notification quotidienne des dates dormantes | ★☆☆☆☆ | Élevé | ✅ Fait |
-| 2 | Enrichissement auto des fiches incomplètes | ★★★☆☆ | Très élevé | À faire |
+| 2 | Enrichissement auto des fiches incomplètes (+ extension Chrome) | ★★★☆☆ | Très élevé | ✅ Fait |
 | 3 | Création auto de tâches selon statut | ★★☆☆☆ | Élevé | À faire |
 | 4 | Assistant questions en français sur les données Orfeo | ★★★☆☆ | Moyen-élevé | À faire |
 | 5 | Scoring de compatibilité artiste / lieu | ★★★★☆ | Très élevé | À faire |
@@ -238,6 +238,12 @@ GMAIL_USER=tonemail@gmail.com
 GMAIL_APP_PASSWORD=motdepasse16caracteres
 EMAIL_TO=destinataire@domaine.com
 SEUIL_JOURS=7
+
+# Automation #2 (optionnelles)
+ENRICH_MODEL=claude-haiku-4-5        # modèle de l'enrichissement API (le moins cher)
+VISION_MODEL=claude-opus-4-8         # modèle du mode vision (extension)
+WEB_SEARCH_MAX_USES=3                # plafond de recherches web par appel (pilote le coût)
+ENRICH_PORT=8723                     # port du serveur local de l'extension
 ```
 
 Voir `.env.example` pour le modèle complet.
@@ -266,3 +272,27 @@ launchctl load ~/Library/LaunchAgents/com.maisondarwish.orfeo.dormant.plist
 | `setup_orfeo.py` | Crée les 3 champs de scoring manquants (idempotent) |
 | `dormant_dates.py` | Notification hebdomadaire des dates sans activité ✅ |
 | `run_dormant.sh` | Wrapper : charge le .env, vérifie si déjà lancé cette semaine |
+| `enrichir_structures.py` | Enrichissement des lieux (CLI). `--list-only`, `--limit/--skip`, `--pks <liste>`, `--apply`. Logge le coût réel dans `cout_claude.log` |
+| `serveur_enrichissement.py` | Serveur local (127.0.0.1) qui relie l'extension Chrome à la logique d'enrichissement. Endpoints `/health · /enrich · /visuel · /apply` |
+| `extension-orfeo/` | Extension Chrome : enrichit la fiche structure ouverte via une commande en français (voir `extension-orfeo/INSTALL.md`) |
+
+### Extension Chrome — enrichir la fiche ouverte
+
+Sur une fiche structure dans Orfeo : clic sur l'extension → commande en français
+(« complète l'adresse, le style ») → aperçu → écriture.
+
+```
+Popup Chrome ──HTTP──▶ serveur local 127.0.0.1 ──▶ enrichir_structures.py
+   (lit le pk)          (clés dans .env)            ──▶ Claude (web search) + API Orfeo
+```
+
+- **Aucune clé dans l'extension** : tout passe par le serveur local ; les clés restent dans `.env`.
+- **Toujours un aperçu avant écriture** ; règle anti-invention + écriture auto FR conservées.
+- **Deux modes** (case « Vision écran ») :
+  - *API seul* (défaut, Haiku + web) : écrit via l'API les champs fiables. **~$0.04–0.07/fiche.**
+  - *Hybride* (coché, + Opus vision) : envoie un screenshot + la carte des champs pour
+    remplir aussi les champs custom à l'écran (tu enregistres dans Orfeo). **~$0.15–0.20/fiche.**
+- **Coût** plafonné par `WEB_SEARCH_MAX_USES` (défaut 3) et journalisé dans `cout_claude.log`.
+
+Installation : voir `extension-orfeo/INSTALL.md`. Démarrage auto du serveur (option) :
+`com.maisondarwish.orfeo.enrich.plist`.

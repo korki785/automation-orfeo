@@ -115,6 +115,54 @@ def action_enrich(corps):
     return 200, res
 
 
+def action_visuel(corps):
+    """Mode hybride (extension phase 3) : aperçu API + plan de remplissage à l'écran.
+    Renvoie {api: <aperçu API>, ecran: [{field_id, valeur, source, confiance}]}."""
+    pk = str(corps.get("pk") or "").strip()
+    command = (corps.get("command") or "").strip()
+    champs = corps.get("fields") or []
+    shot = corps.get("screenshot") or ""
+    if not pk:
+        return 400, {"ok": False, "error": "pk manquant"}
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return 500, {"ok": False, "error": "ANTHROPIC_API_KEY non défini dans .env"}
+
+    struct = structure_par_pk(pk)
+    if not struct:
+        return 404, {"ok": False, "error": f"structure pk={pk} introuvable"}
+
+    # Les deux appels Claude sont indépendants → on les lance en parallèle.
+    # L'API n'écrit JAMAIS que cet ensemble fixe (logique deux-bacs) ; la vision
+    # ignore donc ces libellés sans attendre le résultat API.
+    DEJA_API = ["adresse", "address1", "zipcode", "code postal", "région", "region",
+                "notes", "tags", "téléphone", "telephone", "phone", "mail", "email"]
+    b64 = (shot.split(",", 1)[1] if shot.startswith("data:") else shot) if shot else ""
+
+    def tache_api():
+        enrichi = e.enrichir_via_claude(client(), struct, refs(), commande=command)
+        return enrichi, e.appliquer_enrichissement(struct, enrichi, refs(), apply=False)
+
+    def tache_vision():
+        if not (b64 and champs):
+            return []
+        return e.enrichir_visuel_via_claude(client(), struct, champs, b64, DEJA_API, command)
+
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(max_workers=2) as ex:
+        f_api = ex.submit(tache_api)
+        f_vis = ex.submit(tache_vision)
+        enrichi, api_res = f_api.result()
+        try:
+            ecran = f_vis.result()
+        except Exception as exc:
+            ecran = []
+            api_res["message"] = (api_res.get("message") or "") + f"Vision indisponible : {exc}. "
+
+    purger_cache()
+    _cache_plans[pk] = {"enrichi": enrichi, "ts": time.time()}
+    return 200, {"ok": True, "preview": True, "api": api_res, "ecran": ecran}
+
+
 def action_apply(corps):
     pk = str(corps.get("pk") or "").strip()
     command = (corps.get("command") or "").strip()
@@ -177,6 +225,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/enrich":
                 code, payload = action_enrich(corps)
+            elif route == "/visuel":
+                code, payload = action_visuel(corps)
             elif route == "/apply":
                 code, payload = action_apply(corps)
             else:
