@@ -166,7 +166,7 @@ Générer le token dans Orfeo (page « API & webhooks ») et le placer dans `ORF
 | 2 | Enrichissement auto des fiches incomplètes (+ extension Chrome) | ★★★☆☆ | Très élevé | ✅ Fait |
 | 3 | Création auto de tâches selon statut | ★★☆☆☆ | Élevé | À faire |
 | 4 | Assistant questions en français sur les données Orfeo | ★★★☆☆ | Moyen-élevé | À faire |
-| 5 | Scoring de compatibilité artiste / lieu | ★★★★☆ | Très élevé | À faire |
+| 5 | Scoring de compatibilité artiste / lieu | ★★★★☆ | Très élevé | ✅ Fait |
 | 6 | Brouillons de relance | ★★★☆☆ | Moyen | À faire |
 
 Ordre de construction : **1 → 2 → 3 → 4 → 5 → 6** (valeur rapide d'abord,
@@ -201,14 +201,67 @@ Repérer les `structure` incomplètes, chercher les infos manquantes sur le web,
 « non trouvé ». Un champ vide honnête vaut mieux qu'une donnée inventée.
 Privilégier les coordonnées professionnelles (prospection B2B, cadre RGPD).
 
-### Détail #5 — Scoring de compatibilité
+### Détail #5 — Scoring de compatibilité ✅
 
 Pour un artiste, scorer les 100-300 lieux et prioriser les appels.
 Étapes : récupérer lieux + champs natifs (Orfeo) → récupérer la **programmation
-passée** de chaque salle (**source externe : absente d'Orfeo**, c'est la vraie
-difficulté) → API Claude juge la compatibilité (genre, artistes similaires déjà
-programmés, capacité, type) → score 0-100 + justification → PATCH dans Orfeo
-(`score_compatibilite`, `score_artiste`, `score_date`).
+passée** de chaque salle (**source externe : absente d'Orfeo** → recherche web
+Claude) → l'API Claude juge, en booker France, si programmer l'artiste ici est
+**un bon feat artistique et une date qui a du sens** → score 0-100 + justification.
+
+**Critères (logique booker France, pas rentabilité commerciale)**, par ordre de
+poids : (a) **fit artistique** — le lieu programme-t-il l'esthétique de l'artiste,
+a-t-il accueilli des artistes comparables, son public suivrait-il ; (b) **budget**
+— le lieu a-t-il les moyens du cachet (les SMAC = malus, sauf grosses exceptions ;
+festivals/grandes salles/collectivités dotées = ok) ; (c) **échelle** — jauge dans
+le bon ordre de grandeur (**trop grand = malus autant que trop petit**) ; (d) **gate**
+format amplifié et lieu qui programme vraiment (pas simple location).
+
+**Notes internes d'échange** : les notes de la section « Notes » de la fiche
+(objets `/api/note/` : verdicts, relations, contacts programmateurs) sont injectées
+dans le prompt comme **un facteur parmi d'autres** (pas dominant ; un « n'ira pas
+dessus » fait baisser, une collaboration passée fait légèrement monter). L'absence
+de notes n'est jamais pénalisée. La note de scoring auto-générée est exclue (pas
+d'auto-référence). Un détecteur de sortie corrompue (glitch Haiku : espaces
+intra-mots) relance un essai automatiquement.
+
+**Profil par artiste** (`PROFILS_ARTISTES` dans `scorer_artiste.py`) : esthétiques,
+lieux compatibles/à éviter, jauge idéale, cachet, format — donnés au modèle pour
+qu'il ne devine pas (ex. Gipsy Kings : festivals = bon fit, ~1000-1800 places,
+cachet ~15-20 k€, amplifié). Artiste sans profil → le modèle recherche ces
+paramètres sur le web (confiance abaissée). Le script sort aussi la **jauge estimée**
+et le **type de lieu** (dans le CSV et la note) pour que tu filtres toi-même.
+
+**Un champ personnalisé par artiste**, dont le **label = le nom de l'artiste**
+(ex. champ « Gipsy Kings »). ⚠️ **À créer une seule fois à la main** dans Orfeo
+(Réglages → Champs personnalisés) : l'API Orfeo ne permet pas de créer un champ
+perso (`POST /custom_field/` renvoie 500). Le script retrouve le champ par son
+label et y écrit **le score entier seul** (ex. `25`, pas « 25/100 »). Si le champ
+n'existe pas encore, seule la note est écrite (voir ci-dessous) et le script
+rappelle de le créer.
+
+La **justification** (+ score, sources, datée) va dans la **section « Notes »**
+de la fiche = objets `POST /api/note/` (`content` + `object_id` = pk structure).
+⚠️ Ne PAS confondre avec le champ API `structure.notes`, qui est la section
+**« Description »** (description du lieu, laissée intacte). La note commence par
+`Score <Artiste> : N/100 (date)` — ce préfixe rend l'écriture **idempotente**
+(re-scorer met à jour la note existante de l'artiste au lieu d'en créer une
+nouvelle ; la PATCH d'une note exige `object_id` dans le body).
+
+Sécurité identique à l'enrichissement : **sans `--apply`, aucune écriture** ; le
+CSV `scoring_<slug>.csv` (score, confiance, justification, sources) est toujours
+produit. Batch : `--limit`/`--skip` ou `--pks`. Coût ~0,05 $/lieu (web search).
+
+```bash
+python3 scorer_artiste.py --artiste "Gipsy Kings" --list-only        # liste (gratuit)
+python3 scorer_artiste.py --artiste "Gipsy Kings" --limit 3          # aperçu, aucune écriture
+python3 scorer_artiste.py --artiste "Gipsy Kings" --limit 3 --apply  # écrit note + justif
+python3 scorer_artiste.py --artiste "Céline Dion" --pks 15714248 --apply
+```
+
+Script : `scorer_artiste.py`. (Les champs génériques `score_compatibilite` /
+`score_artiste` de `setup_orfeo.py` sont rendus obsolètes par le modèle « 1 champ
+par artiste » — conservés, non utilisés.)
 
 ---
 
