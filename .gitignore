@@ -13,6 +13,7 @@ __pycache__/
 .derniere_semaine
 *.log
 enrichissement_*.csv
+scoring_*.csv
 
 # Helpers locaux / scripts jetables (ne jamais committer — peuvent contenir des secrets)
 ajouter_cle.sh
