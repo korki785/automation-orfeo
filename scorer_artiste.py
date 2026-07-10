@@ -429,7 +429,7 @@ def _nettoyer_corps(txt):
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lignes)).strip()
 
 
-def echanges_email(struct, max_msgs=6, max_chars=500):
+def echanges_email(struct, max_msgs=10, max_chars=500):
     """Derniers échanges e-mail agence ↔ lieu, condensés et datés (récents d'abord).
     Cherche dans Gmail par domaine pro et/ou adresse exacte du contact. Renvoie une
     liste de chaînes « [date] ENVOYÉ/REÇU : … » ou [] (feature off / rien trouvé)."""

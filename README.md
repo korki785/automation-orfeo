@@ -247,8 +247,9 @@ plus fiable qu'une apparence web. **Ils ne sont PAS dans l'API Orfeo** (l'onglet
 « Email d'Orfeo » n'est pas exposé — aucun endpoint `email`/`message`), donc le
 script les lit **directement dans Gmail par IMAP** (recherche par domaine pro et/ou
 adresse exacte du contact de la fiche ; dossier « Tous les messages » résolu quelle
-que soit la langue du compte ; citations et lignes `>` retirées ; 6 derniers
-messages, datés et marqués ENVOYÉ/REÇU). Ce bloc est injecté dans le prompt et
+que soit la langue du compte ; citations et lignes `>` retirées ; 10 derniers
+messages, datés et marqués ENVOYÉ/REÇU — assez pour couvrir toute une négociation,
+de l'offre de cachet à l'option de date). Ce bloc est injecté dans le prompt et
 **pondère fortement** le score (un deal en cours → très haut ; un refus → très bas),
 tout en restant conditionné à un fit artistique cohérent. Boîte à scanner :
 `SCORING_GMAIL_USER`/`SCORING_GMAIL_APP_PASSWORD` (repli sur `GMAIL_USER`/
