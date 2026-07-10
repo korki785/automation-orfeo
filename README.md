@@ -240,6 +240,24 @@ de notes n'est jamais pénalisée. La note de scoring auto-générée est exclue
 d'auto-référence). Un détecteur de sortie corrompue (glitch Haiku : espaces
 intra-mots) relance un essai automatiquement.
 
+**Historique d'e-mails (signal FORT)** : les vrais échanges agence ↔ lieu (offre
+de cachet chiffrée, option de date, intérêt explicite, ou au contraire refus /
+budget insuffisant) sont le meilleur indicateur d'intérêt et de budget — bien
+plus fiable qu'une apparence web. **Ils ne sont PAS dans l'API Orfeo** (l'onglet
+« Email d'Orfeo » n'est pas exposé — aucun endpoint `email`/`message`), donc le
+script les lit **directement dans Gmail par IMAP** (recherche par domaine pro et/ou
+adresse exacte du contact de la fiche ; dossier « Tous les messages » résolu quelle
+que soit la langue du compte ; citations et lignes `>` retirées ; 6 derniers
+messages, datés et marqués ENVOYÉ/REÇU). Ce bloc est injecté dans le prompt et
+**pondère fortement** le score (un deal en cours → très haut ; un refus → très bas),
+tout en restant conditionné à un fit artistique cohérent. Boîte à scanner :
+`SCORING_GMAIL_USER`/`SCORING_GMAIL_APP_PASSWORD` (repli sur `GMAIL_USER`/
+`GMAIL_APP_PASSWORD`) — mets `SCORING_EMAILS=0` pour désactiver. Défaillance
+(creds absents, IMAP KO, aucun échange) → ignoré silencieusement, jamais pénalisant.
+Exemple vérifié : *Welcome in Tziganie* passe de **88** (fit artistique seul) à
+**97/100** une fois l'échange lu — offre ferme du festival à 22 k€ HT tout compris
+et 2 dates optionnées pour avril 2026.
+
 **Profil par artiste** (`PROFILS_ARTISTES` dans `scorer_artiste.py`) : esthétiques,
 lieux compatibles/à éviter, jauge idéale, cachet, format — donnés au modèle pour
 qu'il ne devine pas (ex. Gipsy Kings : festivals = bon fit, ~1000-1800 places,

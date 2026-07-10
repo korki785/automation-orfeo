@@ -8,6 +8,10 @@ note + sources) est ajoutée dans le champ `notes` de la fiche.
 
   • La programmation passée d'une salle n'est PAS dans Orfeo → recherche web via
     l'API Claude (web search), comme l'enrichissement (automation #2).
+  • Les échanges e-mail réels agence ↔ lieu (offre de cachet, intérêt, refus) ne
+    sont PAS dans l'API Orfeo (onglet « Email d'Orfeo » non exposé) → lus dans
+    Gmail par IMAP et injectés comme signal FORT (budget + intérêt de première
+    main). Désactivable via SCORING_EMAILS=0 ; silencieux si creds Gmail absents.
   • Un champ personnalisé par artiste : `note_<slug>` (ex. `note_gipsy_kings`).
     Créé automatiquement à la volée (idempotent) en mode --apply.
   • Écriture directe dans Orfeo, mais SANS --apply aucune écriture (mode aperçu) ;
@@ -23,6 +27,10 @@ Variables d'environnement :
     ANTHROPIC_API_KEY  Clé API Claude (requise sauf en --list-only)
     ENRICH_MODEL       Modèle Claude (défaut : claude-haiku-4-5, le moins cher)
     WEB_SEARCH_MAX_USES  Plafond de recherches web par lieu (défaut : 3)
+    SCORING_GMAIL_USER / SCORING_GMAIL_APP_PASSWORD  Boîte à scanner pour
+                       l'historique d'e-mails (le compte pro de booking). À défaut,
+                       repli sur GMAIL_USER / GMAIL_APP_PASSWORD.
+    SCORING_EMAILS     « 0 » pour désactiver la lecture des e-mails (défaut : actif)
 
 Usage :
     python3 scorer_artiste.py --artiste "Gipsy Kings" --list-only          # liste les lieux (gratuit)
@@ -37,6 +45,8 @@ import sys
 import csv
 import json
 import time
+import email
+import imaplib
 import datetime
 import argparse
 import unicodedata
@@ -46,6 +56,27 @@ BASE_URL = "https://orfeoapp.com/api"
 TOKEN = os.environ.get("ORFEO_TOKEN", "")
 # Modèle par défaut : le moins cher (Haiku 4.5, ~1$/5$ par M tokens).
 MODEL = os.environ.get("ENRICH_MODEL", "claude-haiku-4-5")
+
+# Accès Gmail (IMAP) pour injecter l'historique d'échanges agence ↔ lieu dans le
+# scoring. Les mails ne sont PAS dans l'API Orfeo (onglet « Email d'Orfeo » non
+# exposé) : on les lit donc directement dans la boîte. Réutilise les creds déjà
+# présents dans .env (mot de passe d'application Gmail). Feature désactivable via
+# SCORING_EMAILS=0 ; silencieuse et sans erreur si les creds manquent.
+# Boîte à scanner : de préférence SCORING_GMAIL_* (le compte pro où arrivent les
+# échanges de booking, ex. hello@maisondarwish.com), sinon repli sur GMAIL_* (le
+# compte déjà utilisé ailleurs, ex. pour les notifications). Éviter ainsi de
+# détourner le compte d'envoi des notifs vers la lecture des mails de booking.
+GMAIL_USER = os.environ.get("SCORING_GMAIL_USER") or os.environ.get("GMAIL_USER", "")
+GMAIL_APP_PASSWORD = (os.environ.get("SCORING_GMAIL_APP_PASSWORD")
+                      or os.environ.get("GMAIL_APP_PASSWORD", ""))
+EMAILS_ACTIFS = os.environ.get("SCORING_EMAILS", "1") not in ("0", "false", "no", "")
+# Domaines e-mail « génériques » : ne discriminent pas un lieu → on ne cherche
+# QUE par adresse exacte pour eux, jamais par domaine (sinon on ramasse tout).
+DOMAINES_GENERIQUES = {
+    "gmail.com", "googlemail.com", "yahoo.fr", "yahoo.com", "hotmail.fr",
+    "hotmail.com", "outlook.fr", "outlook.com", "live.fr", "wanadoo.fr",
+    "orange.fr", "free.fr", "sfr.fr", "laposte.net", "icloud.com", "me.com",
+}
 
 # L'outil web search « dynamique » (_20260209) n'existe que sur Opus 4.6+/Sonnet 4.6.
 # Pour les autres modèles (dont Haiku 4.5), il faut la variante de base _20250305.
@@ -280,6 +311,165 @@ def ecrire_note_scoring(pk, artiste, contenu):
     return r.status_code in (200, 201), "créée"
 
 
+# ── Historique d'e-mails (agence ↔ lieu) via Gmail IMAP ──────────────────────
+# Les échanges réels (offre de cachet, intérêt, refus) sont le signal le plus
+# fiable pour juger budget + intérêt d'un lieu — bien plus qu'une apparence web.
+# Ils ne sont PAS dans Orfeo (onglet e-mail non exposé par l'API), on les lit
+# donc dans Gmail. Toute défaillance (creds absents, IMAP KO) → [] silencieux :
+# le scoring continue exactement comme avant, l'absence n'est jamais pénalisée.
+
+_IMAP = {"conn": None, "ko": False}
+
+
+def _dossier_all_mail(c):
+    """Nom du dossier « Tous les messages » (sent + reçus), quelle que soit la
+    langue du compte : repéré par l'attribut IMAP \\All. Fallback : INBOX."""
+    try:
+        typ, boxes = c.list()
+        if typ == "OK":
+            for b in boxes:
+                s = b.decode() if isinstance(b, bytes) else str(b)
+                if "\\All" in s:
+                    m = re.search(r'"([^"]+)"\s*$', s) or re.search(r'(\S+)\s*$', s)
+                    if m:
+                        return m.group(1)
+    except Exception:
+        pass
+    return "INBOX"
+
+
+def _imap():
+    """Connexion IMAP Gmail réutilisée pour tout le run (une seule). None si indispo."""
+    if _IMAP["ko"]:
+        return None
+    if _IMAP["conn"] is not None:
+        return _IMAP["conn"]
+    if not (EMAILS_ACTIFS and GMAIL_USER and GMAIL_APP_PASSWORD):
+        _IMAP["ko"] = True
+        return None
+    try:
+        c = imaplib.IMAP4_SSL("imap.gmail.com")
+        c.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        typ, _ = c.select(f'"{_dossier_all_mail(c)}"', readonly=True)  # sent + reçus
+        if typ != "OK":
+            c.select("INBOX", readonly=True)
+        _IMAP["conn"] = c
+        return c
+    except Exception:
+        _IMAP["ko"] = True
+        return None
+
+
+def fermer_imap():
+    c = _IMAP.get("conn")
+    if c:
+        try:
+            c.close(); c.logout()
+        except Exception:
+            pass
+    _IMAP["conn"] = None
+
+
+def _emails_et_domaines(struct):
+    """Adresses e-mail exactes + domaines pro du lieu, à partir des contacts de la
+    fiche (contact_infos type « mail ») et du site web. Les domaines génériques
+    (gmail…) ne servent qu'en adresse exacte."""
+    emails, domaines = set(), set()
+    sources = list(struct.get("contact_infos") or [])
+    for p in (struct.get("contacts") or []):
+        pers = p.get("person") if isinstance(p, dict) else None
+        if isinstance(pers, dict):
+            sources += list(pers.get("contact_infos") or [])
+    for ci in sources:
+        v = (ci.get("value") or "").strip().lower()
+        if ci.get("type") == "mail" and "@" in v:
+            emails.add(v)
+            dom = v.split("@")[-1]
+            if dom and dom not in DOMAINES_GENERIQUES:
+                domaines.add(dom)
+    for w in (struct.get("web_addresses") or []):
+        m = re.search(r"https?://([^/]+)", (w.get("address") or "").lower())
+        if m:
+            host = m.group(1)
+            host = host[4:] if host.startswith("www.") else host
+            if "." in host and host not in DOMAINES_GENERIQUES:
+                domaines.add(host)
+    return emails, domaines
+
+
+def _corps_texte(msg):
+    """Corps text/plain d'un message e-mail (décodé), sinon chaîne vide."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain" and "attachment" not in str(
+                    part.get("Content-Disposition") or ""):
+                try:
+                    return (part.get_payload(decode=True) or b"").decode(
+                        part.get_content_charset() or "utf-8", "replace")
+                except Exception:
+                    continue
+        return ""
+    try:
+        return (msg.get_payload(decode=True) or b"").decode(
+            msg.get_content_charset() or "utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def _nettoyer_corps(txt):
+    """Retire les lignes citées (>) et coupe à la citation « Le … a écrit »."""
+    lignes = []
+    for ln in (txt or "").splitlines():
+        s = ln.strip()
+        if s.startswith(">"):
+            continue
+        if re.match(r"(?i)^le .+ a [ée]crit\s*:?\s*$", s):
+            break
+        lignes.append(s)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lignes)).strip()
+
+
+def echanges_email(struct, max_msgs=6, max_chars=500):
+    """Derniers échanges e-mail agence ↔ lieu, condensés et datés (récents d'abord).
+    Cherche dans Gmail par domaine pro et/ou adresse exacte du contact. Renvoie une
+    liste de chaînes « [date] ENVOYÉ/REÇU : … » ou [] (feature off / rien trouvé)."""
+    c = _imap()
+    if not c:
+        return []
+    emails, domaines = _emails_et_domaines(struct)
+    termes = [f"(from:{d} OR to:{d})" for d in domaines] + \
+             [f"(from:{e} OR to:{e})" for e in emails]
+    if not termes:
+        return []
+    requete = " OR ".join(termes)
+    try:
+        typ, data = c.search(None, "X-GM-RAW", f'"{requete}"')
+        if typ != "OK" or not data or not data[0]:
+            return []
+        ids = data[0].split()[-max_msgs:]  # les plus récents
+        out = []
+        for mid in ids:
+            typ, raw = c.fetch(mid, "(RFC822)")
+            if typ != "OK" or not raw or not raw[0]:
+                continue
+            msg = email.message_from_bytes(raw[0][1])
+            exp = email.utils.parseaddr(msg.get("From", ""))[1].lower()
+            sens = "ENVOYÉ" if GMAIL_USER.lower() in exp else "REÇU"
+            date = ""
+            try:
+                dt = email.utils.parsedate_to_datetime(msg.get("Date", ""))
+                date = dt.date().isoformat() if dt else ""
+            except Exception:
+                pass
+            corps = _nettoyer_corps(_corps_texte(msg))
+            if not corps:
+                continue
+            out.append(f"[{date}] {sens} : {corps[:max_chars]}")
+        return out
+    except Exception:
+        return []
+
+
 # ── Claude (recherche web + sortie structurée) ───────────────────────────────
 
 def web_search_tool(modele=None):
@@ -322,6 +512,23 @@ def scorer_via_claude(client, struct, artiste):
     else:
         bloc_notes = ""  # aucune note → on n'en parle pas : l'absence n'est jamais pénalisée
 
+    # Échanges e-mail réels (agence ↔ lieu), lus dans Gmail. Signal de PREMIÈRE MAIN
+    # sur l'intérêt et le budget : plus fort que les notes et que l'apparence web.
+    emails = echanges_email(struct)
+    if emails:
+        bloc_emails = (
+            "\nHISTORIQUE D'ÉCHANGES E-MAIL (agence ↔ lieu, source directe — signal FORT) :\n"
+            + "\n".join(f"- {m}" for m in emails) + "\n"
+            "→ Ce sont de vrais échanges. Pondère fortement : une offre de cachet chiffrée, "
+            "une option de date, un intérêt explicite ou une négociation en cours = le lieu "
+            "VEUT l'artiste et en a le budget → score TRÈS HAUT (appelle en premier). Un refus, "
+            "un « pas pour nous », un budget déclaré insuffisant = score TRÈS BAS. Ce signal "
+            "prime sur l'apparence web et sur les notes internes ; il ne dispense pas d'un fit "
+            "artistique cohérent, mais un deal en cours prouve de fait la pertinence.\n"
+        )
+    else:
+        bloc_emails = ""  # pas d'échange → non pénalisant (comme l'absence de notes)
+
     # Profil de l'artiste : donné au modèle si connu, sinon consigne de recherche web.
     p = profil_artiste(artiste)
     if p:
@@ -356,7 +563,8 @@ def scorer_via_claude(client, struct, artiste):
         f"- Ville : {ville}\n"
         f"- Tags Orfeo : {', '.join(tags) or '(aucun)'}\n"
         f"- Description Orfeo : {notes or '(vide)'}\n"
-        f"{bloc_notes}\n"
+        f"{bloc_notes}"
+        f"{bloc_emails}\n"
         "ÉTAPES :\n"
         "1. Recherche sur le web : programmation passée du lieu (artistes déjà programmés), "
         "genre dominant, JAUGE/capacité, TYPE (festival, SMAC, zénith, aréna, salle de "
@@ -569,6 +777,7 @@ def main():
         ecrits = sum(1 for l in lignes_csv if l["ecrit"] == "oui")
         print(f"→ {len(lignes_csv)} score(s) dans {csv_path} ({ecrits} écrit(s) dans Orfeo)")
 
+    fermer_imap()
     print("\nTerminé.")
 
 
