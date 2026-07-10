@@ -168,9 +168,11 @@ Générer le token dans Orfeo (page « API & webhooks ») et le placer dans `ORF
 | 4 | Assistant questions en français sur les données Orfeo | ★★★☆☆ | Moyen-élevé | À faire |
 | 5 | Scoring de compatibilité artiste / lieu | ★★★★☆ | Très élevé | ✅ Fait |
 | 6 | Brouillons de relance | ★★★☆☆ | Moyen | À faire |
+| 7 | Cockpit local des tâches prioritaires | ★★☆☆☆ | Élevé | ✅ Fait |
 
 Ordre de construction : **1 → 2 → 3 → 4 → 5 → 6** (valeur rapide d'abord,
-gros chantiers une fois l'API maîtrisée).
+gros chantiers une fois l'API maîtrisée). #7 ajouté ensuite (tri par score
+impossible en natif Orfeo).
 
 ### Détail #1 — Dates dormantes ✅
 
@@ -263,6 +265,45 @@ Script : `scorer_artiste.py`. (Les champs génériques `score_compatibilite` /
 `score_artiste` de `setup_orfeo.py` sont rendus obsolètes par le modèle « 1 champ
 par artiste » — conservés, non utilisés.)
 
+### Détail #7 — Cockpit des tâches prioritaires ✅
+
+**Problème.** Le tri natif d'Orfeo ne filtre que par égalité/texte (pas de
+« note > 60 »). Et l'unité de travail réelle n'est pas la fiche mais la **tâche**
+qui y est rattachée : une fiche sans tâche n'est pas à traiter.
+
+**Solution.** Une page web locale qui répond chaque matin « quelles tâches traiter
+en premier ». Petit serveur stdlib (`http.server`) sur `127.0.0.1:8724` — **local
+uniquement** (refuse de démarrer si l'hôte n'est pas loopback ; aucun tunnel, aucun
+lien public ; `ORFEO_TOKEN` jamais transmis au navigateur). Calcul à la demande
+avec cache mémoire (TTL 600 s : 1er appel ~7,5 s de balayage API, suivants instantanés).
+
+**Une passe par source, jointure en mémoire** (tout est inline, aucun fetch détail) :
+- `/task/` → tâches (`title`, `done`, `due_date`, `content_type`, `object_id`).
+- `/structure/` → scores (`custom_fields` inline ; label = artiste, cf. #5).
+- `/project/` → funnel (`place.pk` + `spectacle.name` + `status.name` inline).
+
+**Règles (verrouillées) :**
+- **1 ligne = 1 tâche.** Seules les tâches **ouvertes** (`done=false`) rattachées à
+  une `structure` apparaissent. Les tâches **« PLUS TARD »** (différées) sont exclues.
+- **Le score prime.** L'ordre suit le score artiste de la fiche (valeur réelle).
+  Le **retard** (`due_date` passée) et le **funnel** ne font que **départager à score
+  égal** — jamais un bonus cumulé qui remonterait une tâche sans valeur.
+- Les tâches **sans score** tombent en bas (funnel présent d'abord entre elles).
+
+**Réglages** (`.env`, optionnels) : `COCKPIT_PORT` (8724), `CACHE_TTL` (600),
+`SEUIL_SCORE` (0 = tout afficher ; > 0 coupe le bas), `TITRES_EXCLUS`
+(défaut `PLUS TARD`, séparés par `;`).
+
+```bash
+python3 serveur_cockpit.py          # → http://127.0.0.1:8724
+python3 serveur_cockpit.py --dump   # imprime le JSON calculé et quitte (debug)
+```
+
+Démarrage auto au login (optionnel) : `com.maisondarwish.orfeo.cockpit.plist`
+(`RunAtLoad` + `KeepAlive`, comme l'enrichissement).
+
+Scripts : `serveur_cockpit.py` + `com.maisondarwish.orfeo.cockpit.plist`.
+
 ---
 
 ## 7. Points d'attention
@@ -327,6 +368,8 @@ launchctl load ~/Library/LaunchAgents/com.maisondarwish.orfeo.dormant.plist
 | `run_dormant.sh` | Wrapper : charge le .env, vérifie si déjà lancé cette semaine |
 | `enrichir_structures.py` | Enrichissement des lieux (CLI). `--list-only`, `--limit/--skip`, `--pks <liste>`, `--apply`. Logge le coût réel dans `cout_claude.log` |
 | `serveur_enrichissement.py` | Serveur local (127.0.0.1) qui relie l'extension Chrome à la logique d'enrichissement. Endpoints `/health · /enrich · /visuel · /apply` |
+| `serveur_cockpit.py` | Cockpit local (127.0.0.1:8724) des tâches prioritaires : score prime, exclut « PLUS TARD ». Endpoints `/ · /api/taches · /health`. `--dump` pour debug ✅ |
+| `scorer_artiste.py` | Scoring de compatibilité artiste/lieu (CLI). `--artiste`, `--list-only`, `--limit/--skip`, `--pks`, `--apply` ✅ |
 | `extension-orfeo/` | Extension Chrome : enrichit la fiche structure ouverte via une commande en français (voir `extension-orfeo/INSTALL.md`) |
 
 ### Extension Chrome — enrichir la fiche ouverte
