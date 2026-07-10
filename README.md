@@ -380,7 +380,8 @@ launchctl load ~/Library/LaunchAgents/com.maisondarwish.orfeo.dormant.plist
 | `dormant_dates.py` | Notification hebdomadaire des dates sans activité ✅ |
 | `run_dormant.sh` | Wrapper : charge le .env, vérifie si déjà lancé cette semaine |
 | `enrichir_structures.py` | Enrichissement des lieux (CLI). `--list-only`, `--limit/--skip`, `--pks <liste>`, `--apply`. Logge le coût réel dans `cout_claude.log` |
-| `serveur_enrichissement.py` | Serveur local (127.0.0.1) qui relie l'extension Chrome à la logique d'enrichissement. Endpoints `/health · /enrich · /visuel · /apply` |
+| `serveur_enrichissement.py` | Serveur local (127.0.0.1:8723) qui relie l'extension Chrome à la logique d'enrichissement. Endpoints `/health · /enrich · /visuel · /apply` |
+| `watchdog_enrichissement.sh` | Chien de garde du serveur d'enrichissement : ping `/health` toutes les 120 s, `kickstart` du LaunchAgent si figé/KO. Silencieux tant que tout va bien |
 | `serveur_cockpit.py` | Cockpit local (127.0.0.1:8724) des tâches prioritaires : score prime, exclut « PLUS TARD ». Endpoints `/ · /api/taches · /health`. `--dump` pour debug ✅ |
 | `scorer_artiste.py` | Scoring de compatibilité artiste/lieu (CLI). `--artiste`, `--list-only`, `--limit/--skip`, `--pks`, `--apply` ✅ |
 | `extension-orfeo/` | Extension Chrome : enrichit la fiche structure ouverte via une commande en français (voir `extension-orfeo/INSTALL.md`) |
@@ -405,3 +406,31 @@ Popup Chrome ──HTTP──▶ serveur local 127.0.0.1 ──▶ enrichir_stru
 
 Installation : voir `extension-orfeo/INSTALL.md`. Démarrage auto du serveur (option) :
 `com.maisondarwish.orfeo.enrich.plist`.
+
+#### Robustesse — le serveur ne doit jamais rester « injoignable »
+
+Si l'extension affiche **« Serveur local injoignable. Lance : python3 serveur_enrichissement.py »**,
+c'est que rien n'écoute sur `127.0.0.1:8723`. Deux garde-fous couvrent tous les cas de panne :
+
+| Panne | Rattrapée par | Délai |
+|---|---|---|
+| Le serveur **plante** (le process se termine) | `KeepAlive` de `com.maisondarwish.orfeo.enrich.plist` | immédiat |
+| Le serveur **se fige** (process vivant mais muet) | watchdog `com.maisondarwish.orfeo.enrich-watchdog.plist` | ≤ 120 s |
+| Crash-loop / throttle launchd | watchdog (re-teste toutes les 120 s) | ≤ 120 s |
+| Reboot / login | `RunAtLoad` sur les deux agents | au démarrage |
+
+`KeepAlive` seul ne suffit pas : il ne relance que si le process **se termine**, pas s'il se **fige**.
+Le watchdog (`watchdog_enrichissement.sh`, planifié par `StartInterval` 120 s) comble ce trou en
+appelant `/health` et en forçant un `kickstart` sinon.
+
+Installation des deux agents sur une nouvelle machine :
+```bash
+cp com.maisondarwish.orfeo.enrich.plist com.maisondarwish.orfeo.enrich-watchdog.plist ~/Library/LaunchAgents/
+launchctl load -w ~/Library/LaunchAgents/com.maisondarwish.orfeo.enrich.plist
+launchctl load -w ~/Library/LaunchAgents/com.maisondarwish.orfeo.enrich-watchdog.plist
+```
+
+Relance manuelle de secours (si jamais ça persiste au-delà de ~2 min) :
+```bash
+launchctl kickstart -k gui/$(id -u)/com.maisondarwish.orfeo.enrich
+```

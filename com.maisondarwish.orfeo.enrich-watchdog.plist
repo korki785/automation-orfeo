@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maisondarwish.orfeo.enrich-watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/naeldarwish/automation-orfeo/watchdog_enrichissement.sh</string>
+    </array>
+
+    <!-- Toutes les 120 s : ping /health, kickstart du serveur si figé/KO. -->
+    <key>StartInterval</key>
+    <integer>120</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/naeldarwish/automation-orfeo/watchdog_enrichissement.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/naeldarwish/automation-orfeo/watchdog_enrichissement.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/naeldarwish</string>
+    </dict>
+</dict>
+</plist>
