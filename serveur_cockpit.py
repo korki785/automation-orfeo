@@ -198,7 +198,7 @@ def build_taches():
             "statut": funnel.get(spk),
             "due_date": due,
             "retard": _est_retard(due),
-            "lien": f"https://orfeoapp.com/structure/{spk}/" if spk else None,
+            "lien": f"https://orfeoapp.com/booker/core/structure/{spk}/view/" if spk else None,
         })
     lignes.sort(key=_cle_tri)
     return {
