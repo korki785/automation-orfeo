@@ -84,6 +84,19 @@ GET/POST        /api/note/
 
 Filtre sur champ personnalisé : `?custom_fields=<key>:<valeur>`
 
+### URL de l'appli web (≠ API)
+
+L'API vit sous `/api/…`, mais l'**appli web** (server-rendered, auth par session
+navigateur — le token API n'y donne pas accès) utilise d'autres chemins. Pour
+pointer un lien cliquable vers une fiche depuis un script, utiliser :
+
+```
+Fiche structure :  https://orfeoapp.com/booker/core/structure/<pk>/view/
+```
+
+(⚠️ ce n'est PAS `https://orfeoapp.com/structure/<pk>/` — ce chemin renvoie une
+page introuvable. Utilisé par le cockpit #7.)
+
 ### Limitations découvertes
 
 - **Statuts** : `POST /api/project_status/` retourne HTTP 500 — les statuts doivent
