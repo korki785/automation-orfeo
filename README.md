@@ -259,6 +259,38 @@ Exemple vérifié : *Welcome in Tziganie* passe de **88** (fit artistique seul) 
 **97/100** une fois l'échange lu — offre ferme du festival à 22 k€ HT tout compris
 et 2 dates optionnées pour avril 2026.
 
+**Tags de la fiche — vocabulaire d'agence, et tags périmés.** Les tags Orfeo
+portent un sens commercial que le modèle ne peut pas deviner (`EAT` n'est pas un
+mot anglais : c'est « eu au téléphone »). Ils sont exposés **uniquement dans le
+détail** `/structure/{pk}/`, jamais dans la liste. Surtout : ils sont saisis à la
+main et **rarement mis à jour** — un `Int Gipsy Kings` survit régulièrement à un
+intérêt retombé. `bloc_tags()` donne donc au modèle leur sens **et** la consigne de
+les confronter aux e-mails avant d'en faire un signal.
+
+| Tag | Effet sur le score | Pourquoi |
+|---|---|---|
+| `Int Gipsy Kings`, `Int GK` | Fort — **mais seulement si les mails le confirment** | Le seul vrai signal d'intérêt. Sans mail : « non vérifié », ne monte pas le score, confiance abaissée d'un cran. |
+| `Budget 10K`, `Budget 12K` | **Malus lourd** | Budget constaté **sous** le cachet (15-20 k€). Une date qu'on ne peut pas financer ne se fait pas, quel que soit le fit. Prime sur toute estimation web. |
+| `Budget 15K` | Neutre | Plancher du cachet : tenable mais serré. |
+| `EAT` (eu au téléphone) | **Aucun** | Signifie « je connais le contact », pas « il veut l'artiste ». Ni fit ni budget. |
+| `GK fest`, `GK SMAC Tour`, `GK Casino Tour` | **Aucun** | Simples étiquettes de ciblage interne. |
+| `Location uniquement` | Quasi rédhibitoire | Le lieu ne programme pas, il loue sa salle. |
+
+**Champ `discussion`** (sortie structurée : `vivante` / `morte` / `aucune` /
+`indeterminee`) : état **réel** de la relation, jugé sur les mails et les notes,
+**jamais sur le tag**. Il **n'influence pas le score** — il sert à l'**ordre de
+rappel** : à note haute, une discussion vivante s'appelle avant une piste froide ;
+une discussion vivante sur une fiche mal notée ne remonte pas pour autant. Écrit
+dans le CSV et dans la note de la fiche (`Discussion : …`).
+
+Résultat sur un lot de **80 fiches** (les mieux taguées du CRM, donc le haut du
+panier théorique) : **53 scorent sous 40** et **30 sont en discussion morte** —
+9 discussions vivantes seulement. Cas d'école : *Cartel Concerts*, tagué à la fois
+`Int Gipsy Kings` et `Int GK` (donc n°1 du classement par tags), sort à **8/100,
+discussion morte** — les mails contiennent un refus explicite pour budget
+insuffisant et une note interne « laisse tomber ». Sans la lecture des mails, cette
+fiche arrivait première de la liste d'appels.
+
 **Profil par artiste** (`PROFILS_ARTISTES` dans `scorer_artiste.py`) : esthétiques,
 lieux compatibles/à éviter, jauge idéale, cachet, format — donnés au modèle pour
 qu'il ne devine pas (ex. Gipsy Kings : festivals = bon fit, ~1000-1800 places,
