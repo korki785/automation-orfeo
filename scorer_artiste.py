@@ -145,7 +145,7 @@ SCHEMA_SCORE = {
     "type": "object",
     "additionalProperties": False,
     "required": ["score", "justification", "signaux", "sources", "confiance",
-                 "jauge_estimee", "type_lieu"],
+                 "jauge_estimee", "type_lieu", "discussion"],
     "properties": {
         # Borne 0-100 imposée par le prompt puis re-bornée en code : l'API Claude
         # n'accepte pas minimum/maximum sur un integer dans output_config.
@@ -154,6 +154,10 @@ SCHEMA_SCORE = {
         "signaux": {"type": "array", "items": {"type": "string"}},
         "sources": {"type": "array", "items": {"type": "string"}},
         "confiance": {"type": "string", "enum": ["haute", "moyenne", "basse"]},
+        # État réel de la relation, jugé sur les MAILS (pas sur le tag, souvent périmé).
+        # Sert au tri : à note égale/haute, une discussion vivante se traite en premier.
+        "discussion": {"type": "string",
+                       "enum": ["vivante", "morte", "aucune", "indeterminee"]},
         # Filtrables par l'utilisateur (il affine la jauge lui-même).
         "jauge_estimee": {"type": ["integer", "null"]},
         "type_lieu": {"type": ["string", "null"]},
@@ -262,7 +266,7 @@ def notes_de_structure(pk):
 
 
 def construire_note_texte(artiste, score, justification, sources, date_str,
-                          type_lieu=None, jauge_estimee=None):
+                          type_lieu=None, jauge_estimee=None, discussion=None):
     """Contenu de la note (section « Notes »), formaté avec <br> comme Orfeo.
     Le préfixe « Score <artiste> : » sert à retrouver/mettre à jour la note."""
     lignes = [f"Score {artiste} : {score}/100 ({date_str})"]
@@ -271,6 +275,8 @@ def construire_note_texte(artiste, score, justification, sources, date_str,
         meta.append(f"Type : {type_lieu}")
     if jauge_estimee:
         meta.append(f"Jauge estimée : {jauge_estimee}")
+    if discussion:
+        meta.append(f"Discussion : {discussion}")
     if meta:
         lignes.append(" — ".join(meta))
     lignes.append(justification.strip())
@@ -489,6 +495,81 @@ def texte_semble_corrompu(t):
     return courts / len(mots) > 0.40
 
 
+# Tags Orfeo porteurs de sens commercial : leur signification n'est pas devinable
+# par le modèle (« EAT » = eu au téléphone, pas un mot anglais). Surtout, ils sont
+# saisis à la main et RAREMENT mis à jour : un « Int Gipsy Kings » peut dater d'un
+# intérêt retombé depuis. On les explique au modèle ET on lui impose de les
+# confronter aux e-mails réels avant d'en faire un signal positif.
+SENS_DES_TAGS = {
+    "int gipsy kings": "le lieu a manifesté un INTÉRÊT pour Gipsy Kings",
+    "int gk": "le lieu a manifesté un INTÉRÊT pour Gipsy Kings",
+    "propose gipsy kings": "l'agence a PROPOSÉ Gipsy Kings à ce lieu",
+    "gipsy kings proposés": "l'agence a PROPOSÉ Gipsy Kings à ce lieu",
+    "eat": "EU AU TÉLÉPHONE : l'agent connaît la personne et est déjà en contact. "
+           "NEUTRE : ne dit rien du fit artistique ni du budget, ne monte PAS le score",
+    "rencontre": "rencontre physique avec le lieu (relationnel, pas un signal d'achat)",
+    "mail only": "ce lieu ne répond que par e-mail (pas de téléphone)",
+    "gk fest": "simple étiquette de ciblage tournée — AUCUN effet sur le score",
+    "gk smac tour": "simple étiquette de ciblage tournée — AUCUN effet sur le score",
+    "gk casino tour": "simple étiquette de ciblage tournée — AUCUN effet sur le score",
+    "location uniquement": "le lieu ne programme pas, il loue seulement sa salle",
+    "budget 10k": "BUDGET CONNU ~10 k€ — sous le cachet de l'artiste",
+    "budget 12k": "BUDGET CONNU ~12 k€ — sous le cachet de l'artiste",
+    "budget 15k": "BUDGET CONNU ~15 k€ — plancher du cachet, tout juste tenable",
+}
+
+# Budgets constatés par l'agence, en k€. Un budget CONNU et inférieur au cachet est
+# une preuve directe que le lieu ne peut pas payer : bien plus fiable qu'une estimation
+# web. Le cachet Gipsy Kings est de 15-20 k€ → 10K et 12K sont rédhibitoires.
+BUDGETS_TAG = {"budget 10k": 10, "budget 12k": 12, "budget 15k": 15}
+
+
+def bloc_tags(tags):
+    """Explique au modèle le sens des tags porteurs, et impose la confrontation aux
+    e-mails pour les tags d'intérêt (souvent périmés faute de mise à jour)."""
+    if not tags:
+        return ""
+    connus = [(t, SENS_DES_TAGS[t.strip().lower()]) for t in tags
+              if t.strip().lower() in SENS_DES_TAGS]
+    if not connus:
+        return ""
+    interet = any(t.strip().lower() in ("int gipsy kings", "int gk") for t, _ in connus)
+    bloc = ("\nSENS DES TAGS DE CETTE FICHE (vocabulaire interne de l'agence) :\n"
+            + "\n".join(f"- « {t} » : {sens}" for t, sens in connus) + "\n")
+    if interet:
+        bloc += (
+            "→ ATTENTION : le tag d'INTÉRÊT est saisi à la main et souvent PÉRIMÉ (l'intérêt "
+            "est retombé sans que le tag soit retiré). Ne le traite JAMAIS comme un signal "
+            "positif en soi. Confronte-le à l'HISTORIQUE E-MAIL ci-dessous : si les mails "
+            "confirment un intérêt vivant (relance, option, cachet discuté, réponse récente) "
+            "→ signal fort, score haut. Si les mails montrent un refus, un silence prolongé "
+            "après relance, ou une piste morte → le tag est périmé, IGNORE-LE et score sur le "
+            "seul fit réel. En l'absence totale de mails, considère le tag comme NON VÉRIFIÉ : "
+            "il ne monte pas le score, et la confiance baisse d'un cran.\n")
+    if any(t.strip().lower() == "eat" for t, _ in connus):
+        bloc += ("→ « EAT » signifie seulement que l'agent connaît déjà le contact. C'est du "
+                 "relationnel, PAS un signal d'achat ni d'intérêt : il ne doit PAS monter le score.\n")
+    if any(t.strip().lower() in ("gk fest", "gk smac tour", "gk casino tour") for t, _ in connus):
+        bloc += ("→ Les tags de tournée (GK fest / GK SMAC Tour / GK Casino Tour) sont de simples "
+                 "étiquettes de ciblage internes : AUCUN effet sur le score.\n")
+    budgets = [BUDGETS_TAG[t.strip().lower()] for t, _ in connus
+               if t.strip().lower() in BUDGETS_TAG]
+    if budgets:
+        b = min(budgets)
+        bloc += (
+            f"→ BUDGET CONNU DE L'AGENCE : ~{b} k€. C'est une donnée constatée sur le terrain, "
+            "elle PRIME sur toute estimation web. Le cachet de l'artiste est de 15-20 k€ : "
+            + ("ce budget est INSUFFISANT → le lieu ne peut pas payer l'artiste. MALUS LOURD, "
+               "score bas quel que soit le fit artistique : une belle date qu'on ne peut pas "
+               "financer ne se fait pas.\n" if b < 15 else
+               "ce budget est au PLANCHER du cachet : faisable mais serré, ne le compte ni "
+               "comme un plus ni comme un malus.\n"))
+    if any(t.strip().lower() == "location uniquement" for t, _ in connus):
+        bloc += ("→ « Location uniquement » : le lieu ne programme pas et n'achète pas de "
+                 "spectacle → score TRÈS BAS, quel que soit le reste.\n")
+    return bloc
+
+
 def scorer_via_claude(client, struct, artiste):
     """Recherche web la programmation passée du lieu, puis note sa compatibilité
     avec `artiste` sur 100. Renvoie le dict conforme à SCHEMA_SCORE, ou None."""
@@ -563,6 +644,7 @@ def scorer_via_claude(client, struct, artiste):
         f"- Ville : {ville}\n"
         f"- Tags Orfeo : {', '.join(tags) or '(aucun)'}\n"
         f"- Description Orfeo : {notes or '(vide)'}\n"
+        f"{bloc_tags(tags)}"
         f"{bloc_notes}"
         f"{bloc_emails}\n"
         "ÉTAPES :\n"
@@ -590,6 +672,15 @@ def scorer_via_claude(client, struct, artiste):
         "- jauge_estimee : capacité en nombre de places (entier) si trouvée/estimable, sinon null.\n"
         "- type_lieu : type court du lieu (ex. « festival world », « SMAC », « zénith », "
         "« théâtre de ville »), ou null.\n"
+        "- discussion : état RÉEL de la relation commerciale, jugé sur les E-MAILS et les notes, "
+        "JAMAIS sur le seul tag (qui est souvent périmé) —\n"
+        "    « vivante »  = échange en cours : réponse du lieu, relance suivie d'effet, option, "
+        "cachet ou date discutés, intérêt réaffirmé récemment ;\n"
+        "    « morte »    = refus explicite, « pas pour nous », budget déclaré insuffisant, ou "
+        "silence prolongé du lieu malgré une ou plusieurs relances ;\n"
+        "    « aucune »   = aucun échange trouvé (jamais démarché, ou rien dans les mails) ;\n"
+        "    « indeterminee » = des traces existent mais ne permettent pas de trancher.\n"
+        "  Ce champ ne modifie PAS le score : il sert uniquement à l'ordre de rappel.\n"
         "- sources : URLs réellement consultées. Cite au moins une source si confiance haute/moyenne."
     )
 
@@ -729,8 +820,10 @@ def main():
         signaux = data.get("signaux", [])
         jauge = data.get("jauge_estimee")
         type_lieu = data.get("type_lieu")
+        discussion = data.get("discussion", "indeterminee")
         print(f"    score = {score}/100 (confiance {conf}) — {type_lieu or 'type ?'}"
-              + (f", ~{jauge} places" if jauge else ""))
+              + (f", ~{jauge} places" if jauge else "")
+              + f" | discussion : {discussion}")
         if signaux:
             print(f"    signaux : {', '.join(signaux[:5])}")
         print(f"    justif : {justif[:110]}…" if len(justif) > 110 else f"    justif : {justif}")
@@ -739,7 +832,8 @@ def main():
         if args.apply:
             # 1. Justification → section « Notes » (objet /api/note/), idempotent.
             contenu = construire_note_texte(artiste, score, justif, sources, date_str,
-                                            type_lieu=type_lieu, jauge_estimee=jauge)
+                                            type_lieu=type_lieu, jauge_estimee=jauge,
+                                            discussion=discussion)
             ok_note, action = ecrire_note_scoring(pk, artiste, contenu)
             time.sleep(0.12)
             print(f"    {'✓' if ok_note else '✗'} note {action} dans « Notes »")
@@ -760,7 +854,7 @@ def main():
 
         lignes_csv.append({
             "pk": pk, "nom": nom, "ville": s_full.get("city"),
-            "score": score, "confiance": conf,
+            "score": score, "discussion": discussion, "confiance": conf,
             "type_lieu": type_lieu or "", "jauge_estimee": jauge if jauge else "",
             "justification": justif,
             "signaux": " ; ".join(signaux),

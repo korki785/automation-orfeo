@@ -21,3 +21,7 @@ push_accor_test.py
 
 # macOS
 .DS_Store
+
+# Sauvegardes de tâches avant suppression en masse (données CRM, local seulement)
+sauvegarde_taches_*.json
+sauvegarde_taches_*.json
