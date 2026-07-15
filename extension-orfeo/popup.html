@@ -31,6 +31,7 @@
            border-radius: 6px; padding: 1px 6px; margin: 1px 3px 1px 0; }
     .valider .k { color: var(--bad); }
     small.note { color: var(--mut); }
+    .score { font-size: 15px; font-weight: 600; color: var(--accent); }
   </style>
 </head>
 <body>
@@ -39,18 +40,17 @@
     <div id="cible">Détection…</div>
   </header>
   <div class="corps">
-    <textarea id="cmd" placeholder="Ex : complète l'adresse, la ville et le style musical&#10;(Entrée = aperçu · Maj+Entrée = nouvelle ligne)"></textarea>
+    <textarea id="cmd" placeholder="Consigne facultative (ex : cherche surtout la jauge)&#10;(Entrée = compléter la fiche · Maj+Entrée = nouvelle ligne)"></textarea>
     <label style="display:flex; align-items:center; gap:6px; margin-top:8px; color:var(--mut);">
       <input type="checkbox" id="vision" /> Vision écran (Opus, +cher · remplit les champs custom)
     </label>
     <div class="row">
-      <button id="btn-apercu" class="primary">Aperçu (Entrée)</button>
+      <button id="btn-completer" class="primary">Compléter la fiche</button>
     </div>
     <p id="etat"></p>
     <div id="apercu"></div>
     <div class="row" id="row-actions" style="display:none">
-      <button id="btn-ecrire" class="primary">Écrire (API)</button>
-      <button id="btn-remplir">Remplir la page</button>
+      <button id="btn-tout" class="primary">Tout écrire</button>
     </div>
   </div>
   <script src="popup.js"></script>

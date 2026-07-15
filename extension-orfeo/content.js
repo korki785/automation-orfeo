@@ -103,6 +103,99 @@ function remplirChamps(plan) {
   return n;
 }
 
+// ── Site web : le seul champ qu'Orfeo n'expose PAS en écriture sur son API ───
+// `structure.web_addresses` est read_only (PATCH accepté mais ignoré). L'UI passe
+// par POST /backend/entitywebaddress/bulk_set/, qui exige la session navigateur.
+// On ne rejoue pas cet appel : on remplit le formulaire inline de la fiche et on
+// clique son bouton — Orfeo enregistre lui-même, avec son propre CSRF.
+const CHAMP_WEB = "input[type='text'], input[type='url'], input.form-control";
+const BOUTON_WEB = "button[type='submit'], button.btn-primary, input[type='submit']";
+
+function attendre(trouver, ms = 3000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    (function reessayer() {
+      const el = trouver();
+      if (el) return resolve(el);
+      if (Date.now() - t0 > ms) return resolve(null);
+      setTimeout(reessayer, 100);
+    })();
+  });
+}
+
+// La zone du site : d'abord l'id observé sur la fiche, sinon le formulaire qui
+// poste vers bulk_set (signature la plus fiable — c'est l'endpoint d'Orfeo lui-même).
+function zoneWeb() {
+  const parId = document.querySelector("#inline-web-infos");
+  if (parId) return parId;
+  const parAction = document.querySelector("form[action*='entitywebaddress']");
+  if (parAction) return parAction.closest("td, div, section") || parAction;
+  return null;
+}
+
+// Photographie de ce que le script VOIT réellement dans la page — le popup la
+// renvoie au serveur local, qui la journalise. Sans ça, un échec de remplissage
+// est muet : la page est le seul endroit où l'on peut constater le problème.
+function diagnosticWeb() {
+  const zone = zoneWeb();
+  const d = {
+    url: location.href,
+    zone_par_id: Boolean(document.querySelector("#inline-web-infos")),
+    zone_par_action: Boolean(document.querySelector("form[action*='entitywebaddress']")),
+    zone_trouvee: Boolean(zone),
+  };
+  if (zone) {
+    d.zone_tag = zone.tagName;
+    d.zone_id = zone.id || "(sans id)";
+    d.inputs = [...zone.querySelectorAll("input")].map(
+      (i) => `${i.type}|name=${i.name || "-"}|val=${(i.value || "").slice(0, 30)}`);
+    d.boutons = [...zone.querySelectorAll("button, a, input[type=submit]")].map(
+      (b) => `${b.tagName}|${(b.type || "")}|${(b.textContent || b.value || "").trim().slice(0, 25)}`);
+    d.html = (zone.innerHTML || "").replace(/\s+/g, " ").slice(0, 600);
+  }
+  return d;
+}
+
+async function remplirSiteWeb(url) {
+  const zone = zoneWeb();
+  if (!zone) {
+    return { ok: false, raison: "Zone « Site internet » introuvable — ouvre la fiche en vue (/view/) et recharge la page.",
+             diagnostic: diagnosticWeb() };
+  }
+
+  // Le formulaire inline n'apparaît qu'après un clic sur la zone.
+  let input = zone.querySelector(CHAMP_WEB);
+  if (!input) {
+    (zone.querySelector("a, button") || zone).click();
+    input = await attendre(() => zone.querySelector(CHAMP_WEB));
+  }
+  if (!input) {
+    return { ok: false, raison: "Zone trouvée, mais aucun champ de saisie après le clic.",
+             diagnostic: diagnosticWeb() };
+  }
+
+  // Ne jamais écraser une adresse déjà saisie — même règle que l'API : on ne
+  // remplit que le vide.
+  const actuel = (input.value || "").trim();
+  if (actuel) {
+    return { ok: false, raison: `Déjà renseigné (${actuel}) — non écrasé.`, diagnostic: diagnosticWeb() };
+  }
+
+  poser(input, url);
+  const bouton = zone.querySelector(BOUTON_WEB);
+  if (!bouton) {
+    return { ok: false, raison: "Champ rempli, mais bouton d'enregistrement introuvable — valide à la main.",
+             diagnostic: diagnosticWeb() };
+  }
+  bouton.click();
+
+  // Orfeo enregistre en arrière-plan (POST bulk_set). On laisse le temps à sa
+  // réponse, puis on photographie la zone : c'est le seul moyen de savoir si
+  // l'enregistrement a réellement pris, ou si le clic n'a rien déclenché.
+  await new Promise((r) => setTimeout(r, 1500));
+  return { ok: true, valeur: url, diagnostic: diagnosticWeb() };
+}
+
 // ── Messages depuis le popup ─────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg) return;
@@ -112,6 +205,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ fields: collecterChamps() });
   } else if (msg.type === "ORFEO_FILL") {
     sendResponse({ filled: remplirChamps(msg.plan) });
+  } else if (msg.type === "ORFEO_FILL_WEB") {
+    remplirSiteWeb(msg.url).then(sendResponse);   // asynchrone : le canal reste ouvert
   }
   return true;
 });

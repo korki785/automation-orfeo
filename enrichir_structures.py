@@ -4,25 +4,34 @@ Enrichissement des fiches lieux (structure) Orfeo — automation #2.
 Repère les structures à l'adresse incomplète, cherche les infos manquantes sur
 le web via l'API Claude (web search), puis applique une logique en deux bacs.
 
-  • Bac « fiable » → écriture directe dans Orfeo, RÉSERVÉE AUX LIEUX FRANÇAIS :
-        - address1, zipcode      → trouvés par Claude (texte), si vides
-        - region                 → DÉDUITE du code postal (référentiels Orfeo)
+  • Bac « fiable » → écriture directe dans Orfeo :
+        - address1, zipcode      → trouvés par Claude, si vides — LIEUX FRANÇAIS SEULS
+        - region                 → DÉDUITE du code postal — LIEUX FRANÇAIS SEULS
         - notes                  → court récap de contexte, si notes vide
         - tags                   → tags PRÉEXISTANTS pertinents (type de lieu,
                                    styles), choisis parmi le vocabulaire Orfeo,
                                    fusionnés avec les tags déjà posés
         - contacts (téléphone, mail générique) → POST /entitycontactinfo/
-  • Bac « à valider » → site web, contact programmateur (nom+mail direct), et —
-        pour les lieux étrangers — l'adresse/les contacts non écrits. Exporté en
-        CSV avec source + niveau de confiance. JAMAIS écrit automatiquement.
+  • Bac « écran » → le SITE WEB, que l'API Orfeo refuse d'écrire (voir plus bas).
+        Renvoyé à l'extension, qui remplit le formulaire de la fiche. Pas de DOM
+        en CLI → le site y reste dans le bac « à valider ».
+  • Bac « à valider » → contact programmateur (nom+mail direct) et, pour les lieux
+        étrangers, l'adresse non écrite. Exporté en CSV avec source + niveau de
+        confiance. JAMAIS écrit automatiquement.
 
 Faits Orfeo vérifiés :
   - region écrivable ; department_id / country_id read-only (dérivés serveur).
-    Écrire l'adresse d'un lieu ÉTRANGER peut effacer son country_id dérivé →
-    l'écriture auto est donc réservée aux lieux français.
+    Écrire l'adresse d'un lieu ÉTRANGER efface son country_id dérivé → SEULE
+    l'adresse est réservée aux lieux français. Les tags (PATCH sans champ
+    d'adresse), les contacts (autre endpoint) et la description s'écrivent
+    partout : ils ne peuvent pas toucher au country_id.
   - tags : champ marqué read-only en OPTIONS mais PATCH {"tags":[pk,…]} fonctionne.
     Toujours fusionner ; n'utiliser que des tags préexistants (/entitytag/).
   - contacts : POST /entitycontactinfo/ {type:'phone'|'mail', value, entity}.
+  - web_addresses : VRAIMENT read-only (2026-07-13). PATCH accepté mais ignoré,
+    nested create ignoré, aucun sous-endpoint sur /api/. L'UI passe par
+    POST /backend/entitywebaddress/bulk_set/, qui exige la session navigateur et
+    refuse le token API (403) → le site web ne peut être écrit que par le DOM.
 
 Règle absolue : ne jamais inventer. Info introuvable → null / « non_trouve ».
 
@@ -247,6 +256,31 @@ def structures_par_pks(pks):
 
 
 def patch_structure(pk, payload):
+    """PATCH une structure — en REPORTANT TOUJOURS ses tags réels.
+
+    PIÈGE ORFEO (vérifié 2026-07-13, coûteux) : Orfeo REMPLACE la liste des tags
+    à chaque PATCH, il ne l'ajoute jamais. Deux façons de tout effacer :
+      1. ne pas mentionner `tags` (ex. `PATCH {"notes": "x"}`) → tags remis à VIDE ;
+      2. envoyer une liste PARTIELLE → tout ce qui n'y est pas est effacé.
+    Le cas 2 a effacé les tags de 79 lieux lors du scoring du 2026-07-11 :
+    l'appelant construisait `tags` à partir d'une fiche issue de la LISTE
+    `/structure/`, où l'API n'expose PAS les tags — la base de fusion était donc
+    vide, et le PATCH ne renvoyait que les nouveaux tags. Les custom_fields et
+    les contacts, eux, survivent — c'est propre à `tags`.
+
+    Garde-fou UNIQUE, ici, dans la seule fonction qui écrit : on relit TOUJOURS
+    les tags réels depuis le détail `/structure/{pk}/` et on les FUSIONNE avec les
+    tags éventuellement passés par l'appelant (traités comme de simples AJOUTS).
+    Aucun appelant ne peut donc effacer un tag, quelle que soit la fiche qu'il
+    détient. Si la relecture échoue, on refuse le PATCH plutôt que de risquer un
+    effacement."""
+    r = requests.get(f"{BASE_URL}/structure/{pk}/", headers=orfeo_headers(), timeout=15)
+    if r.status_code != 200:
+        # Tags actuels inconnus → ne rien écrire plutôt que tout effacer.
+        return r
+    actuels = {t.get("pk") for t in (r.json().get("tags") or []) if t.get("pk")}
+    a_ajouter = {p for p in (payload.get("tags") or []) if p}
+    payload = {**payload, "tags": sorted(actuels | a_ajouter)}
     return requests.patch(f"{BASE_URL}/structure/{pk}/", headers=orfeo_headers(),
                           json=payload, timeout=15)
 
@@ -489,13 +523,15 @@ def enrichir_via_claude(client, struct, refs, commande=None):
 # ── Logique des deux bacs ────────────────────────────────────────────────────
 
 def champs_fiables_a_ecrire(struct, enrichi, refs):
-    """Champs structure à PATCHer (hors tags). Lieux FRANÇAIS uniquement."""
-    adr = enrichi.get("adresse", {})
-    if (adr.get("pays") or "").strip().lower() != "france":
-        return {}
+    """Champs structure à PATCHer (hors tags).
 
+    Seule l'ADRESSE est réservée aux lieux français : la PATCHer sur un lieu
+    étranger efface son `country_id` dérivé côté serveur Orfeo. La description
+    ne touche pas à l'adresse → elle s'écrit partout."""
     a_ecrire = {}
-    if adr.get("confiance") == "haute":
+    adr = enrichi.get("adresse", {})
+
+    if est_francais(enrichi) and adr.get("confiance") == "haute":
         for champ in ("address1", "zipcode"):
             valeur = propre(adr.get(champ))
             if vide(struct.get(champ)) and not vide(valeur):
@@ -519,9 +555,10 @@ def est_francais(enrichi):
 
 def tags_a_ajouter(struct, enrichi, refs):
     """pks de tags préexistants à ajouter (hors internes, hors déjà posés).
-    Réservé aux lieux français pour rester cohérent avec l'écriture auto."""
-    if not est_francais(enrichi):
-        return []
+
+    Vaut pour les lieux étrangers aussi : les tags partent dans un PATCH qui ne
+    contient aucun champ d'adresse, donc sans risque pour le `country_id` dérivé
+    (c'est lui, et lui seul, qui impose la restriction France sur l'adresse)."""
     deja = {t.get("pk") for t in (struct.get("tags") or [])}
     pks = []
     for nom in enrichi.get("tags", []) or []:
@@ -533,18 +570,34 @@ def tags_a_ajouter(struct, enrichi, refs):
 
 def contacts_a_creer(struct, enrichi, existants):
     """[(type, value)] téléphone + mail générique à créer (confiance haute,
-    non déjà présents). Lieux français uniquement."""
-    if not est_francais(enrichi):
-        return []
+    non déjà présents).
+
+    Vaut pour les lieux étrangers aussi : un contact est un POST sur
+    /entitycontactinfo/, il ne touche jamais l'adresse ni le `country_id`."""
     c = enrichi.get("contact", {})
     if c.get("confiance") != "haute":
         return []
-    norm = lambda v: (v or "").replace(" ", "").lower()
-    deja = {(x.get("type"), norm(x.get("value"))) for x in existants}
+
+    def norm(typ, v):
+        """Un téléphone se compare sur ses CHIFFRES, pas sur son écriture : sinon
+        « +32 2 548 24 84 » (→ 3225482484) et « 02 548 24 84 » (→ 025482484)
+        passent pour deux numéros et la fiche récolte un doublon.
+
+        On compare les 8 derniers chiffres : c'est le plus grand suffixe commun
+        aux deux écritures d'un même numéro, indicatif pays et 0 initial mis à
+        part (FR comme BE). Deux numéros réellement distincts qui partagent leurs
+        8 derniers chiffres, c'est assez improbable pour ne pas s'en soucier."""
+        v = (v or "").strip().lower()
+        if typ != "phone":
+            return v.replace(" ", "")
+        chiffres = "".join(ch for ch in v if ch.isdigit())
+        return chiffres[-8:] if len(chiffres) >= 8 else chiffres
+
+    deja = {(x.get("type"), norm(x.get("type"), x.get("value"))) for x in existants}
     sortie = []
     for typ, champ in (("phone", "telephone"), ("mail", "email_generique")):
         val = propre(c.get(champ))
-        if vide(val) or (typ, norm(val)) in deja:
+        if vide(val) or (typ, norm(typ, val)) in deja:
             continue
         # La recherche web masque parfois les mails ("[email protected]") : ne jamais
         # écrire un mail masqué/invalide. Orfeo le refuse (HTTP 500) de toute façon.
@@ -554,9 +607,41 @@ def contacts_a_creer(struct, enrichi, existants):
     return sortie
 
 
-def lignes_a_valider(struct, enrichi, ecrit_auto):
-    """Bac à valider : site web + programmateur (toujours), et — si le lieu n'est
-    pas auto-enrichi (étranger) — l'adresse et les contacts non écrits."""
+def site_web_a_proposer(struct, enrichi):
+    """Site web à écrire — via le FORMULAIRE de la page, pas via l'API.
+
+    L'API Orfeo ne sait pas écrire une adresse web : `structure.web_addresses` est
+    read_only côté serveur (PATCH accepté mais ignoré, pas de sous-endpoint sur
+    /api/, nested create ignoré ; vérifié 2026-07-13). L'UI Orfeo passe par
+    POST /backend/entitywebaddress/bulk_set/, qui exige la session navigateur —
+    inaccessible au token API. L'extension remplit donc le champ inline de la
+    fiche (td#inline-web-infos) et laisse Orfeo enregistrer lui-même.
+
+    Renvoie {valeur, source, confiance} ou None. Ne propose rien si la fiche a
+    déjà une adresse web (on ne remplace jamais une donnée existante). Vaut pour
+    les lieux étrangers aussi : le DOM ne touche pas au country_id dérivé."""
+    # `web_addresses` n'existe que sur le détail (/structure/<pk>/), pas sur la liste.
+    # Absent = on ignore si la fiche a déjà un site → ne rien proposer (le site reste
+    # dans le bac « à valider », comportement historique du CLI).
+    if "web_addresses" not in struct or not vide(struct.get("web_addresses")):
+        return None
+    c = enrichi.get("contact", {})
+    url = propre(c.get("site_web"))
+    if vide(url) or c.get("confiance") not in ("haute", "moyenne"):
+        return None
+    if not str(url).lower().startswith(("http://", "https://")):
+        url = "https://" + str(url).lstrip("/")
+    return {"valeur": url, "source": c.get("source") or "", "confiance": c.get("confiance")}
+
+
+def lignes_a_valider(struct, enrichi, adresse_ecrite, site_propose=False):
+    """Bac à valider : programmateur (toujours — un nom + un mail direct ne
+    s'écrivent jamais tout seuls), le site web s'il ne part pas à l'écran, et
+    l'adresse d'un lieu étranger (jamais écrite : elle effacerait le country_id).
+
+    `adresse_ecrite` : l'adresse est partie via l'API (lieu français) → inutile
+    de la lister ici.
+    `site_propose`   : le site web part en remplissage d'écran → pas de doublon."""
     pk = struct.get("pk") or struct.get("id")
     nom = struct.get("name")
     lignes = []
@@ -571,22 +656,21 @@ def lignes_a_valider(struct, enrichi, ecrit_auto):
 
     contact = enrichi.get("contact", {})
     prog = enrichi.get("programmateur", {})
-    ajoute("contact", "site_web", contact.get("site_web"), contact)
+    if not site_propose:
+        ajoute("contact", "site_web", contact.get("site_web"), contact)
     ajoute("programmateur", "nom", prog.get("nom"), prog)
     ajoute("programmateur", "email", prog.get("email"), prog)
 
-    if not ecrit_auto:  # lieu étranger : rien n'a été écrit, tout va en validation
+    if not adresse_ecrite:  # lieu étranger : l'adresse n'est jamais écrite (country_id)
         adr = enrichi.get("adresse", {})
         for champ in ("address1", "zipcode", "city", "pays"):
             ajoute("adresse", champ, adr.get(champ), adr)
-        ajoute("contact", "email_generique", contact.get("email_generique"), contact)
-        ajoute("contact", "telephone", contact.get("telephone"), contact)
     return lignes
 
 
 # ── Traitement d'une structure (réutilisé par le CLI et le serveur local) ─────
 
-def appliquer_enrichissement(s, enrichi, refs, apply):
+def appliquer_enrichissement(s, enrichi, refs, apply, pour_ecran=False):
     """À partir d'un résultat Claude `enrichi` déjà obtenu, calcule (et applique si
     apply=True) les écritures Orfeo, et renvoie un résultat JSON-able.
       apply=False → aperçu : `ecrit`/`tags_ajoutes` = ce qui SERAIT écrit, rien n'est patché.
@@ -598,6 +682,7 @@ def appliquer_enrichissement(s, enrichi, refs, apply):
         "pk": pk, "nom": s.get("name"), "ok": False, "applique": bool(apply),
         "adresse_confiance": None, "resume": None,
         "ecrit": {}, "tags_ajoutes": [], "contacts": [], "a_valider": [], "message": "",
+        "site_web": None,   # écrit par l'extension via le formulaire de la page (pas l'API)
     }
 
     if not enrichi:
@@ -612,13 +697,27 @@ def appliquer_enrichissement(s, enrichi, refs, apply):
     fiables = champs_fiables_a_ecrire(s, enrichi, refs)
     tag_pks = tags_a_ajouter(s, enrichi, refs)
     tag_noms = [n for n in (enrichi.get("tags") or []) if refs.tag_pk(n) in tag_pks]
-    existants = contacts_existants(pk) if est_francais(enrichi) else []
+    existants = contacts_existants(pk)
     contacts = contacts_a_creer(s, enrichi, existants)
+
+    # Un tag hors vocabulaire Orfeo est écarté (on n'en crée jamais) — mais en le
+    # taisant, on laissait croire qu'il avait été posé. On le dit.
+    deja_noms = {(t.get("name") or "").strip().lower() for t in (s.get("tags") or [])}
+    ignores = [n for n in (enrichi.get("tags") or [])
+               if refs.tag_pk(n) is None
+               and (n or "").strip().lower() not in TAGS_INTERNES
+               and (n or "").strip().lower() not in deja_noms]
+    if ignores:
+        res["message"] += ("Tag(s) inconnu(s) du vocabulaire Orfeo, non posé(s) : "
+                           + ", ".join(ignores) + ". ")
 
     payload = dict(fiables)
     if tag_pks:
-        deja = {t.get("pk") for t in (s.get("tags") or [])}
-        payload["tags"] = sorted(deja | set(tag_pks))
+        # NE PAS pré-fusionner avec s.get("tags") : `s` peut venir de la LISTE
+        # `/structure/`, qui n'expose pas les tags → base vide → effacement.
+        # On ne passe QUE les ajouts ; patch_structure relit les tags réels et
+        # fusionne (garde-fou unique contre l'effacement, cf. sa docstring).
+        payload["tags"] = sorted(set(tag_pks))
 
     if payload:
         if apply:
@@ -641,7 +740,12 @@ def appliquer_enrichissement(s, enrichi, refs, apply):
             time.sleep(0.12)
         res["contacts"].append({"type": typ, "valeur": val, "statut": statut})
 
-    res["a_valider"] = lignes_a_valider(s, enrichi, est_francais(enrichi))
+    # Bac « écran » : réservé à l'extension (seule à pouvoir remplir le formulaire).
+    # En CLI, pas de DOM → le site web reste dans le bac « à valider » (CSV).
+    res["site_web"] = site_web_a_proposer(s, enrichi) if pour_ecran else None
+    # L'adresse n'est écrite qu'en France : ailleurs, elle reste à valider à la main.
+    res["a_valider"] = lignes_a_valider(s, enrichi, adresse_ecrite=est_francais(enrichi),
+                                        site_propose=bool(res["site_web"]))
     res["ok"] = True
     return res
 

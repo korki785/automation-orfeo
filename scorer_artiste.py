@@ -225,6 +225,24 @@ def get_structure(pk):
 
 
 def patch_structure(pk, payload):
+    """PATCH une structure — en REPORTANT TOUJOURS ses tags réels.
+
+    PIÈGE ORFEO (vérifié 2026-07-13) : Orfeo REMPLACE la liste des tags à chaque
+    PATCH. Un PATCH partiel qui ne mentionne pas `tags` la remet à VIDE ; une
+    liste PARTIELLE efface tout le reste. C'est exactement ce que faisait
+    l'écriture du score (`PATCH {"custom_fields": …}`) : elle a effacé les tags
+    des 79 lieux scorés le 2026-07-11, sans le moindre signal d'erreur (HTTP 200).
+    Les custom_fields et les contacts, eux, survivent — c'est propre à `tags`.
+
+    Garde-fou : on relit TOUJOURS les tags réels depuis le détail et on fusionne
+    avec les tags éventuellement passés (traités comme des AJOUTS) → aucun appelant
+    ne peut effacer un tag. Relecture en échec → on refuse le PATCH."""
+    r = requests.get(f"{BASE_URL}/structure/{pk}/", headers=orfeo_headers(), timeout=15)
+    if r.status_code != 200:
+        return r          # tags actuels inconnus → ne rien écrire plutôt que tout effacer
+    actuels = {t.get("pk") for t in (r.json().get("tags") or []) if t.get("pk")}
+    a_ajouter = {p for p in (payload.get("tags") or []) if p}
+    payload = {**payload, "tags": sorted(actuels | a_ajouter)}
     return requests.patch(f"{BASE_URL}/structure/{pk}/", headers=orfeo_headers(),
                           json=payload, timeout=15)
 

@@ -205,12 +205,24 @@ Scripts : `dormant_dates.py` + `run_dormant.sh`
 ### Détail #2 — Enrichissement des fiches
 
 Repérer les `structure` incomplètes, chercher les infos manquantes sur le web,
-écrire dans Orfeo. **Logique en deux bacs :**
-- **Bac « fiable » → écriture directe** (PATCH) : nom, adresse, ville/CP, site web,
-  téléphone standard, mail générique (contact@…), type de salle, style musical.
-- **Bac « à valider » → tableau séparé, pas d'écriture auto** : contacts
-  programmateurs (nom + mail direct). Chaque info accompagnée de sa **source** et
-  d'un **niveau de confiance**. Validation humaine avant injection.
+écrire dans Orfeo. **Logique en trois bacs :**
+- **Bac « fiable » → écriture directe** (PATCH, lieux **français** seulement) :
+  adresse, code postal, région (déduite du CP), description, tags préexistants,
+  téléphone et mail générique (contact@…). Écrire l'adresse d'un lieu étranger
+  effacerait son `country_id` dérivé → l'écriture auto s'y arrête.
+- **Bac « écran » → le site web** (extension seulement). **L'API Orfeo ne sait pas
+  écrire une adresse web** : `structure.web_addresses` est `read_only` côté serveur
+  (le PATCH renvoie 200 mais l'ignore ; aucun sous-endpoint sur `/api/` ; le nested
+  create est ignoré aussi — vérifié le 2026-07-13). L'UI Orfeo passe par
+  `POST /backend/entitywebaddress/bulk_set/`, qui exige la **session navigateur** et
+  refuse le token API (403). L'extension remplit donc le formulaire inline de la fiche
+  (`td#inline-web-infos`) et clique son bouton : Orfeo enregistre lui-même. Vaut aussi
+  pour les lieux étrangers (le DOM ne touche pas au `country_id`). Jamais d'écrasement :
+  une fiche qui a déjà un site n'est pas touchée. En CLI (pas de DOM), le site web
+  reste dans le bac « à valider ».
+- **Bac « à valider » → CSV, pas d'écriture auto** : contacts programmateurs (nom +
+  mail direct), et pour les lieux étrangers l'adresse et les contacts non écrits.
+  Chaque info accompagnée de sa **source** et d'un **niveau de confiance**.
 
 **Règle absolue : ne jamais inventer un mail ou un nom.** Si non trouvé, écrire
 « non trouvé ». Un champ vide honnête vaut mieux qu'une donnée inventée.
@@ -431,7 +443,7 @@ launchctl load ~/Library/LaunchAgents/com.maisondarwish.orfeo.dormant.plist
 | `dormant_dates.py` | Notification hebdomadaire des dates sans activité ✅ |
 | `run_dormant.sh` | Wrapper : charge le .env, vérifie si déjà lancé cette semaine |
 | `enrichir_structures.py` | Enrichissement des lieux (CLI). `--list-only`, `--limit/--skip`, `--pks <liste>`, `--apply`. Logge le coût réel dans `cout_claude.log` |
-| `serveur_enrichissement.py` | Serveur local (127.0.0.1:8723) qui relie l'extension Chrome à la logique d'enrichissement. Endpoints `/health · /enrich · /visuel · /apply` |
+| `serveur_enrichissement.py` | Serveur local (127.0.0.1:8723) qui relie l'extension Chrome à la logique d'enrichissement **et au scoring**. Endpoints `/health · /enrich · /visuel · /apply · /score · /score_apply` |
 | `watchdog_enrichissement.sh` | Chien de garde du serveur d'enrichissement : ping `/health` toutes les 120 s, `kickstart` du LaunchAgent si figé/KO. Silencieux tant que tout va bien |
 | `serveur_cockpit.py` | Cockpit local (127.0.0.1:8724) des tâches prioritaires : score prime, exclut « PLUS TARD ». Endpoints `/ · /api/taches · /health`. `--dump` pour debug ✅ |
 | `scorer_artiste.py` | Scoring de compatibilité artiste/lieu (CLI). `--artiste`, `--list-only`, `--limit/--skip`, `--pks`, `--apply` ✅ |
@@ -439,21 +451,36 @@ launchctl load ~/Library/LaunchAgents/com.maisondarwish.orfeo.dormant.plist
 
 ### Extension Chrome — enrichir la fiche ouverte
 
-Sur une fiche structure dans Orfeo : clic sur l'extension → commande en français
-(« complète l'adresse, le style ») → aperçu → écriture.
+Sur une fiche structure dans Orfeo : clic sur l'extension → **« Compléter la fiche »**
+→ aperçu groupé → **« Tout écrire »**. Deux clics, tout y passe.
 
 ```
-Popup Chrome ──HTTP──▶ serveur local 127.0.0.1 ──▶ enrichir_structures.py
-   (lit le pk)          (clés dans .env)            ──▶ Claude (web search) + API Orfeo
+Popup Chrome ──HTTP──▶ serveur local 127.0.0.1 ──▶ enrichir_structures.py  (adresse, tags, contacts, site web)
+   (lit le pk)          (clés dans .env)         └─▶ scorer_artiste.py      (score Gipsy Kings)
+                                                     ──▶ Claude (web search) + API Orfeo
 ```
+
+**« Compléter la fiche »** lance l'enrichissement **et** le scoring **en parallèle** (~1 min),
+puis affiche un seul aperçu : adresse/tags/contacts (API) · site web · score · champs à valider.
+**« Tout écrire »** applique les trois canaux d'un coup. Un canal qui échoue n'annule pas les
+autres — le popup dit lequel est passé et lequel a raté.
+
+**Trois canaux d'écriture, non interchangeables :**
+
+| Canal | Ce qu'il écrit | Comment |
+|---|---|---|
+| **API Orfeo** | adresse, CP, région, description, tags, contacts · **score** (champ perso + note) | PATCH + POST, token dans `.env` |
+| **Formulaire de la fiche** | **le site web** | `web_addresses` est `read_only` sur l'API (voir Détail #2) → l'extension remplit `td#inline-web-infos` et clique le bouton ; Orfeo enregistre lui-même |
+| **Écran** (mode vision) | champs custom repérés par Opus | remplis à l'écran, **c'est toi qui cliques Enregistrer** |
 
 - **Aucune clé dans l'extension** : tout passe par le serveur local ; les clés restent dans `.env`.
 - **Toujours un aperçu avant écriture** ; règle anti-invention + écriture auto FR conservées.
-- **Deux modes** (case « Vision écran ») :
-  - *API seul* (défaut, Haiku + web) : écrit via l'API les champs fiables. **~$0.04–0.07/fiche.**
-  - *Hybride* (coché, + Opus vision) : envoie un screenshot + la carte des champs pour
-    remplir aussi les champs custom à l'écran (tu enregistres dans Orfeo). **~$0.15–0.20/fiche.**
-- **Coût** plafonné par `WEB_SEARCH_MAX_USES` (défaut 3) et journalisé dans `cout_claude.log`.
+- **Jamais d'écrasement** : ni l'API ni le formulaire ne remplacent une valeur déjà saisie.
+- Le **site web** exige la fiche ouverte en **vue** (`/view/`), là où Orfeo affiche « Site internet ».
+- Le **champ personnalisé « Gipsy Kings »** doit préexister dans Orfeo (l'API refuse de le créer) ;
+  s'il manque, seule la note est écrite et le popup le dit.
+- **Coût** : ~$0.10–0.15/fiche (enrichissement + score), ~$0.25 avec la vision. Plafonné par
+  `WEB_SEARCH_MAX_USES` (défaut 3), journalisé dans `cout_claude.log`.
 
 Installation : voir `extension-orfeo/INSTALL.md`. Démarrage auto du serveur (option) :
 `com.maisondarwish.orfeo.enrich.plist`.
